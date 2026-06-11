@@ -28,32 +28,37 @@
 #include <cstring>
 #include <string>
 #include <vector>
+#include "stages.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
 
 // ------------------------------------------------------------
-// 定数
+// 設定 (beatpath.cfg から起動時に読み込み)
 // ------------------------------------------------------------
-static const int WIN_W = 880;
-static const int WIN_H = 640;
-static const int GRID_W = 7;
-static const int GRID_H = 5;
-static const int CELL   = 80;
-static const int GRID_X = 40;
-static const int GRID_Y = 140;
-static const int MAX_BALLS = 64;
+struct Config {
+    int gridW    = 7;
+    int gridH    = 5;
+    int cell     = 80;
+    int volume   = 80;
+    int menuBpm  = 112;
+    int maxBalls = 64;
 
-enum TileType {
-    T_EMPTY = 0,
-    T_TURN_R, T_TURN_L,      // 方向転換
-    T_SPLIT, T_SPLIT3,       // 分裂
-    T_SPEED2, T_SLOW,        // 速度変化
-    T_STOP,                  // 1拍停止
-    T_PAINT_R, T_PAINT_B, T_PAINT_Y, // 色変更 (音色も変わる)
-    T_COUNT
+    // 派生レイアウト (computeDerived() で計算)
+    int gridX  = 40;   // 固定左マージン
+    int gridY  = 140;  // 固定上マージン (ヘッダー高さ)
+    int panelX = 0;
+    int winW   = 0;
+    int winH   = 0;
+
+    void computeDerived() {
+        panelX = gridX + gridW * cell + 66;
+        winW   = panelX + 214;
+        winH   = std::max(640, gridY + gridH * cell + 120);
+    }
 };
+static Config cfg;
 
 static const SDL_Color BALLCOL[3] = {
     {235,  85,  95, 255},   // 0: RED
@@ -440,61 +445,6 @@ struct Ball {
     int hn = 0, hi = 0;
 };
 
-struct StartDef { int x, y, dx, dy; };
-struct GoalDef  { int x, y; int color; };       // color -1 = 何色でもOK
-struct WallDef  { int x, y; };
-struct WarpDef  { int x1, y1, x2, y2; };        // 双方向ワープ
-
-struct StageDef {
-    const char* name;
-    int bpm, beatsPM;
-    std::vector<StartDef> starts;
-    std::vector<GoalDef>  goals;
-    std::vector<WallDef>  walls;
-    std::vector<WarpDef>  warps;
-    std::vector<std::pair<TileType, int>> inv;
-};
-
-static std::vector<StageDef> makeStages() {
-    return {
-        // 1: チュートリアル - 曲がる
-        { "FIRST STEPS", 112, 4,
-          {{0,2,1,0}}, {{6,0,-1}}, {}, {},
-          {{T_TURN_L,1},{T_TURN_R,1}} },
-        // 2: 分裂で2つのゴールへ同時到達
-        { "SPLIT", 116, 6,
-          {{0,2,1,0}}, {{6,1,-1},{6,3,-1}}, {}, {},
-          {{T_SPLIT,1},{T_TURN_R,1},{T_TURN_L,1}} },
-        // 3: 三分裂で3ゴール
-        { "TRIPLE", 120, 8,
-          {{0,2,1,0}}, {{6,0,-1},{6,2,-1},{6,4,-1}}, {}, {},
-          {{T_SPLIT3,1},{T_TURN_R,1},{T_TURN_L,1}} },
-        // 4: 壁を球をぶつけて破壊 (壁ヒット = スネア)
-        { "BREAK", 118, 4,
-          {{0,2,1,0}}, {{6,2,-1}},
-          {{4,1},{4,2},{4,3}}, {},
-          {{T_SPLIT3,1},{T_TURN_R,1},{T_TURN_L,1}} },
-        // 5: ワープ (入口と出口のセット)
-        { "WARP", 122, 6,
-          {{0,2,1,0}}, {{6,4,-1}},
-          {}, {{2,2, 4,0}},
-          {{T_TURN_R,1},{T_TURN_L,1}} },
-        // 6: 色ギミック - ペイントして同色ゴールへ
-        { "COLORS", 124, 6,
-          {{0,2,1,0}}, {{6,1,0},{6,3,1}}, {}, {},
-          {{T_SPLIT,1},{T_TURN_R,1},{T_TURN_L,1},{T_PAINT_R,1},{T_PAINT_B,1}} },
-        // 7: 複数スタート + 3ゴール
-        { "DUET", 126, 8,
-          {{0,1,1,0},{0,3,1,0}}, {{6,0,-1},{6,2,-1},{6,4,-1}}, {}, {},
-          {{T_SPLIT,1},{T_TURN_R,2},{T_TURN_L,2}} },
-        // 8: 総決算 - 壁 + ワープ + 色 + 速度系のおまけ付き
-        { "FINALE", 128, 8,
-          {{0,2,1,0}}, {{6,1,0},{6,3,1}},
-          {{4,2},{4,3}}, {{5,0, 1,4}},
-          {{T_SPLIT,1},{T_TURN_R,2},{T_TURN_L,1},
-           {T_PAINT_R,1},{T_PAINT_B,1},{T_SPEED2,1},{T_STOP,1}} },
-    };
-}
 
 struct Wall { int x, y; bool alive; };
 struct Flash { int x, y; double t; };
@@ -507,7 +457,7 @@ struct Game {
     int curStage = 0;
     Scene scene = SC_TITLE;
 
-    TileType grid[GRID_H][GRID_W];
+    std::vector<std::vector<TileType>> grid;  // grid[y][x]
     std::vector<Ball> balls;
     std::vector<int>  goalLit;
     std::vector<Wall> walls;
@@ -569,8 +519,11 @@ static bool isStart(int cx, int cy) {
     return false;
 }
 static int goalIndexAt(int cx, int cy) {
-    for (size_t i = 0; i < stage().goals.size(); i++)
-        if (stage().goals[i].x == cx && stage().goals[i].y == cy) return (int)i;
+    for (size_t i = 0; i < stage().goals.size(); i++) {
+        auto& g = stage().goals[i];
+        if (g.x >= cfg.gridW || g.y >= cfg.gridH) continue; // OOB
+        if (g.x == cx && g.y == cy) return (int)i;
+    }
     return -1;
 }
 static int wallIndexAt(int cx, int cy) {
@@ -606,7 +559,8 @@ static void spawnBurst(double px, double py, int n, Uint8 r, Uint8 g, Uint8 b, d
     }
 }
 static void cellBurst(int cx, int cy, Uint8 r, Uint8 g, Uint8 b, int n, double speed) {
-    spawnBurst(GRID_X + cx * CELL + CELL / 2.0, GRID_Y + cy * CELL + CELL / 2.0,
+    spawnBurst(cfg.gridX + cx * cfg.cell + cfg.cell / 2.0,
+               cfg.gridY + cy * cfg.cell + cfg.cell / 2.0,
                n, r, g, b, speed);
 }
 
@@ -617,14 +571,16 @@ static int colorWave(int color) { return color < 0 ? 0 : 1 + color; }
 // ------------------------------------------------------------
 static void loadStage(int idx) {
     G.curStage = idx;
-    memset(G.grid, 0, sizeof(G.grid));
+    G.grid.assign(cfg.gridH, std::vector<TileType>(cfg.gridW, T_EMPTY));
     G.balls.clear();
     G.flashes.clear();
     G.parts.clear();
     G.inv = stage().inv;
     G.goalLit.assign(stage().goals.size(), 0);
     G.walls.clear();
-    for (auto& w : stage().walls) G.walls.push_back({w.x, w.y, true});
+    for (auto& w : stage().walls)
+        if (w.x < cfg.gridW && w.y < cfg.gridH)
+            G.walls.push_back({w.x, w.y, true});
     G.cleared = false;
     G.everTriggered = false;
     G.goalsEverHit = 0;
@@ -644,7 +600,7 @@ static void loadStage(int idx) {
 }
 
 static void enterMenuMusic() {
-    A.bpm.store(112);
+    A.bpm.store(cfg.menuBpm);
     A.beatsPM.store(4);
     A.layer.store(1);
     A.ballLayer.store(0);
@@ -659,7 +615,7 @@ static void enterMenuMusic() {
 // ------------------------------------------------------------
 static bool processCell(Ball& b, std::vector<Ball>& newBalls) {
     // 場外
-    if (b.x < 0 || b.x >= GRID_W || b.y < 0 || b.y >= GRID_H) {
+    if (b.x < 0 || b.x >= cfg.gridW || b.y < 0 || b.y >= cfg.gridH) {
         b.alive = false;
         addVoice(V_CLICK, 180, 0.4);
         return false;
@@ -784,27 +740,40 @@ static void onBeat() {
         }
     }
     for (auto& nb : newBalls)
-        if ((int)G.balls.size() < MAX_BALLS) G.balls.push_back(nb);
+        if ((int)G.balls.size() < cfg.maxBalls) G.balls.push_back(nb);
     G.balls.erase(std::remove_if(G.balls.begin(), G.balls.end(),
                                  [](const Ball& b){ return !b.alive; }),
                   G.balls.end());
 
     // ---- 毎小節の頭に発射 (クリア後も鳴り続ける = 完成した曲がループ) ----
     if (idx == 0) {
-        for (auto& s : stage().starts)
-            if ((int)G.balls.size() < MAX_BALLS) {
+        for (auto& s : stage().starts) {
+            if (s.x >= cfg.gridW || s.y >= cfg.gridH) continue; // OOB
+            if ((int)G.balls.size() < cfg.maxBalls) {
                 Ball b;
                 b.x = s.x; b.y = s.y; b.px = s.x; b.py = s.y;
                 b.dx = s.dx; b.dy = s.dy;
                 G.balls.push_back(b);
             }
+        }
     }
 
     // ---- ゴール点灯とクリア判定 (全ゴール同時点灯でクリア) ----
-    bool allLit = !G.goalLit.empty();
-    for (auto& l : G.goalLit) {
-        if (l > 0) l--;
-        if (l <= 0) allLit = false;
+    bool allLit = false;
+    bool hasInBoundsGoal = false;
+    for (size_t i = 0; i < G.goalLit.size(); i++) {
+        auto& g = stage().goals[i];
+        if (g.x >= cfg.gridW || g.y >= cfg.gridH) continue; // OOB
+        hasInBoundsGoal = true;
+        if (G.goalLit[i] > 0) G.goalLit[i]--;
+    }
+    if (hasInBoundsGoal) {
+        allLit = true;
+        for (size_t i = 0; i < G.goalLit.size(); i++) {
+            auto& g = stage().goals[i];
+            if (g.x >= cfg.gridW || g.y >= cfg.gridH) continue;
+            if (G.goalLit[i] <= 0) { allLit = false; break; }
+        }
     }
     if (allLit && !G.cleared) {
         G.cleared = true;
@@ -814,15 +783,17 @@ static void onBeat() {
         addVoice(V_BELL,  659.25, 0.9);
         addVoice(V_BELL,  783.99, 0.9);
         addVoice(V_BELL, 1046.50, 0.8);
-        for (auto& g : stage().goals)
-            cellBurst(g.x, g.y, 255, 230, 120, 20, 260);
+        for (auto& g : stage().goals) {
+            if (g.x < cfg.gridW && g.y < cfg.gridH)
+                cellBurst(g.x, g.y, 255, 230, 120, 20, 260);
+        }
         G.shake = 9;
     }
 
     // ---- 進行度に応じて音楽レイヤーを増やす ----
     bool anyPlaced = false;
-    for (int y = 0; y < GRID_H; y++)
-        for (int x = 0; x < GRID_W; x++)
+    for (int y = 0; y < cfg.gridH; y++)
+        for (int x = 0; x < cfg.gridW; x++)
             if (G.grid[y][x] != T_EMPTY) anyPlaced = true;
     int layer = 0;
     if (anyPlaced || G.everTriggered) layer = 1;
@@ -835,13 +806,15 @@ static void onBeat() {
 // ------------------------------------------------------------
 // 入力 (ドラッグ&ドロップ)
 // ------------------------------------------------------------
-static SDL_Rect paletteRect(int i) { return SDL_Rect{ 678, 178 + i * 62, 56, 56 }; }
+static SDL_Rect paletteRect(int i) {
+    return SDL_Rect{ cfg.panelX + 12, cfg.gridY + 38 + i * 62, 56, 56 };
+}
 
 static bool cellAt(int mx, int my, int& cx, int& cy) {
-    if (mx < GRID_X || my < GRID_Y) return false;
-    cx = (mx - GRID_X) / CELL;
-    cy = (my - GRID_Y) / CELL;
-    return cx < GRID_W && cy < GRID_H;
+    if (mx < cfg.gridX || my < cfg.gridY) return false;
+    cx = (mx - cfg.gridX) / cfg.cell;
+    cy = (my - cfg.gridY) / cfg.cell;
+    return cx < cfg.gridW && cy < cfg.gridH;
 }
 
 static const char* tileName(TileType t) {
@@ -922,34 +895,35 @@ static void renderGame(SDL_Renderer* r, double nowSec, int mx, int my) {
 
     // ---- ヘッダ ----
     SDL_SetRenderDrawColor(r, 235, 235, 240, 255);
-    drawText(r, 40 + ox, 24 + oy, 3, stage().name);
+    drawText(r, cfg.gridX + ox, 24 + oy, 3, stage().name);
     snprintf(buf, sizeof(buf), "STAGE %d   BPM %d   %d BEAT",
              G.curStage + 1, stage().bpm, bpmeas);
     SDL_SetRenderDrawColor(r, 150, 150, 165, 255);
-    drawText(r, 40 + ox, 58 + oy, 2, buf);
+    drawText(r, cfg.gridX + ox, 58 + oy, 2, buf);
 
     // ---- 音楽レベルメーター (右上) ----
+    int meterX = cfg.winW - 190;
     SDL_SetRenderDrawColor(r, 150, 150, 165, 255);
-    drawText(r, 690, 24, 1, "MUSIC LV");
+    drawText(r, meterX, 24, 1, "MUSIC LV");
     int lay = A.layer.load();
     for (int i = 0; i < 4; i++) {
-        SDL_Rect rc{ 690 + i * 26, 38, 20, 12 };
+        SDL_Rect rc{ meterX + i * 26, 38, 20, 12 };
         if (i <= lay) SDL_SetRenderDrawColor(r, 120, 230, 160, 255);
         else          SDL_SetRenderDrawColor(r, 60, 60, 76, 255);
         SDL_RenderFillRect(r, &rc);
     }
     snprintf(buf, sizeof(buf), "VOL %d", A.vol100.load());
     SDL_SetRenderDrawColor(r, 110, 110, 128, 255);
-    drawText(r, 690, 58, 1, buf);
+    drawText(r, meterX, 58, 1, buf);
 
     // ---- 拍子インジケータ + コード表示 ----
-    int bcx = GRID_X + GRID_W * CELL / 2 - (bpmeas - 1) * 22 + ox;
+    int bcx = cfg.gridX + cfg.gridW * cfg.cell / 2 - (bpmeas - 1) * 22 + ox;
     int bcy = 96 + oy;
     for (int i = 0; i < bpmeas; i++) {
         int x = bcx + i * 44;
         if (i == G.lastBeatIdx) {
-            SDL_SetRenderDrawColor(r, 250, 200, 90, 255);
-            fillCircle(r, x, bcy, (int)(13 + 5 * pulse));
+            SDL_SetRenderDrawColor(r, 220, 175, 75, 255);
+            fillCircle(r, x, bcy, (int)(12 + 2 * pulse));
         } else {
             SDL_SetRenderDrawColor(r, 120, 120, 135, 255);
             drawCircle(r, x, bcy, 12);
@@ -959,31 +933,34 @@ static void renderGame(SDL_Renderer* r, double nowSec, int mx, int my) {
     for (int c = 0; c < 4; c++) {
         if (c == prog) SDL_SetRenderDrawColor(r, 235, 235, 240, 255);
         else           SDL_SetRenderDrawColor(r, 85, 85, 100, 255);
-        drawText(r, GRID_X + GRID_W * CELL - 110 + c * 28 + ox, 88 + oy, 2, CHORD_NAME[c]);
+        drawText(r, cfg.gridX + cfg.gridW * cfg.cell - 110 + c * 28 + ox, 88 + oy, 2, CHORD_NAME[c]);
     }
 
     // ---- 市松盤面 (拍でほんのり明滅) ----
-    int bright = (int)(8 * pulse);
-    for (int y = 0; y < GRID_H; y++)
-        for (int x = 0; x < GRID_W; x++) {
-            SDL_Rect rc{ GRID_X + x * CELL + ox, GRID_Y + y * CELL + oy, CELL, CELL };
+    int bright = (int)(3 * pulse);
+    for (int y = 0; y < cfg.gridH; y++)
+        for (int x = 0; x < cfg.gridW; x++) {
+            SDL_Rect rc{ cfg.gridX + x * cfg.cell + ox, cfg.gridY + y * cfg.cell + oy, cfg.cell, cfg.cell };
             if ((x + y) % 2 == 0)
-                SDL_SetRenderDrawColor(r, (Uint8)(218+bright), (Uint8)(218+bright), (Uint8)(228+bright), 255);
+                SDL_SetRenderDrawColor(r, (Uint8)(190+bright), (Uint8)(190+bright), (Uint8)(202+bright), 255);
             else
-                SDL_SetRenderDrawColor(r, (Uint8)(184+bright), (Uint8)(184+bright), (Uint8)(198+bright), 255);
+                SDL_SetRenderDrawColor(r, (Uint8)(158+bright), (Uint8)(158+bright), (Uint8)(172+bright), 255);
             SDL_RenderFillRect(r, &rc);
         }
     SDL_SetRenderDrawColor(r, 70, 70, 85, 255);
-    SDL_Rect frame{ GRID_X - 2 + ox, GRID_Y - 2 + oy, GRID_W * CELL + 4, GRID_H * CELL + 4 };
+    SDL_Rect frame{ cfg.gridX - 2 + ox, cfg.gridY - 2 + oy,
+                    cfg.gridW * cfg.cell + 4, cfg.gridH * cfg.cell + 4 };
     SDL_RenderDrawRect(r, &frame);
 
     // ---- スタート ----
     for (auto& s : stage().starts) {
-        SDL_Rect rc{ GRID_X + s.x * CELL + 4 + ox, GRID_Y + s.y * CELL + 4 + oy, CELL - 8, CELL - 8 };
+        if (s.x >= cfg.gridW || s.y >= cfg.gridH) continue;
+        SDL_Rect rc{ cfg.gridX + s.x * cfg.cell + 4 + ox, cfg.gridY + s.y * cfg.cell + 4 + oy,
+                     cfg.cell - 8, cfg.cell - 8 };
         SDL_SetRenderDrawColor(r, 70, 175, 95, 255);
         SDL_RenderFillRect(r, &rc);
         SDL_SetRenderDrawColor(r, 245, 250, 245, 255);
-        int tx = rc.x + 24, ty = rc.y + rc.h / 2, tw = 26, th = 18;
+        int tx = rc.x + rc.w / 4, ty = rc.y + rc.h / 2, tw = rc.w / 2, th = rc.h / 3;
         for (int i = 0; i < tw; i++) {
             int h = th - i * th / tw;
             SDL_RenderDrawLine(r, tx + i, ty - h, tx + i, ty + h);
@@ -993,7 +970,9 @@ static void renderGame(SDL_Renderer* r, double nowSec, int mx, int my) {
     // ---- ゴール (色付き対応) ----
     for (size_t i = 0; i < stage().goals.size(); i++) {
         auto& g = stage().goals[i];
-        SDL_Rect rc{ GRID_X + g.x * CELL + 4 + ox, GRID_Y + g.y * CELL + 4 + oy, CELL - 8, CELL - 8 };
+        if (g.x >= cfg.gridW || g.y >= cfg.gridH) continue;
+        SDL_Rect rc{ cfg.gridX + g.x * cfg.cell + 4 + ox, cfg.gridY + g.y * cfg.cell + 4 + oy,
+                     cfg.cell - 8, cfg.cell - 8 };
         Uint8 cr = 215, cg = 180, cb = 80;
         if (g.color >= 0) { cr = BALLCOL[g.color].r; cg = BALLCOL[g.color].g; cb = BALLCOL[g.color].b; }
         if (G.goalLit[i] > 0) {
@@ -1014,7 +993,8 @@ static void renderGame(SDL_Renderer* r, double nowSec, int mx, int my) {
     // ---- 壁 ----
     for (auto& w : G.walls) {
         if (!w.alive) continue;
-        SDL_Rect rc{ GRID_X + w.x * CELL + 6 + ox, GRID_Y + w.y * CELL + 6 + oy, CELL - 12, CELL - 12 };
+        SDL_Rect rc{ cfg.gridX + w.x * cfg.cell + 6 + ox, cfg.gridY + w.y * cfg.cell + 6 + oy,
+                     cfg.cell - 12, cfg.cell - 12 };
         SDL_SetRenderDrawColor(r, 72, 70, 84, 255);
         SDL_RenderFillRect(r, &rc);
         SDL_SetRenderDrawColor(r, 120, 116, 136, 255);
@@ -1028,8 +1008,9 @@ static void renderGame(SDL_Renderer* r, double nowSec, int mx, int my) {
     for (auto& w : stage().warps) {
         int pts[2][2] = {{w.x1, w.y1}, {w.x2, w.y2}};
         for (auto& p : pts) {
-            int cx = GRID_X + p[0] * CELL + CELL / 2 + ox;
-            int cy = GRID_Y + p[1] * CELL + CELL / 2 + oy;
+            if (p[0] >= cfg.gridW || p[1] >= cfg.gridH) continue;
+            int cx = cfg.gridX + p[0] * cfg.cell + cfg.cell / 2 + ox;
+            int cy = cfg.gridY + p[1] * cfg.cell + cfg.cell / 2 + oy;
             SDL_SetRenderDrawColor(r, 110, 230, 230, 255);
             double rot = nowSec * 3.0;
             drawArc(r, cx, cy, 22, rot, rot + 2.2);
@@ -1041,16 +1022,19 @@ static void renderGame(SDL_Renderer* r, double nowSec, int mx, int my) {
     }
 
     // ---- 配置済みギミック ----
-    for (int y = 0; y < GRID_H; y++)
-        for (int x = 0; x < GRID_W; x++)
+    for (int y = 0; y < cfg.gridH; y++)
+        for (int x = 0; x < cfg.gridW; x++)
             if (G.grid[y][x] != T_EMPTY)
-                drawTileIcon(r, G.grid[y][x], GRID_X + x * CELL + ox, GRID_Y + y * CELL + oy, CELL, 255);
+                drawTileIcon(r, G.grid[y][x],
+                             cfg.gridX + x * cfg.cell + ox,
+                             cfg.gridY + y * cfg.cell + oy,
+                             cfg.cell, 255);
 
     // ---- ギミック発動フラッシュ ----
     for (auto& f : G.flashes) {
         Uint8 a = (Uint8)std::max(0.0, 160.0 * (1.0 - f.t / 0.35));
         SDL_SetRenderDrawColor(r, 255, 255, 255, a);
-        SDL_Rect rc{ GRID_X + f.x * CELL + ox, GRID_Y + f.y * CELL + oy, CELL, CELL };
+        SDL_Rect rc{ cfg.gridX + f.x * cfg.cell + ox, cfg.gridY + f.y * cfg.cell + oy, cfg.cell, cfg.cell };
         SDL_RenderFillRect(r, &rc);
     }
 
@@ -1059,7 +1043,7 @@ static void renderGame(SDL_Renderer* r, double nowSec, int mx, int my) {
         int cx, cy;
         if (cellAt(mx, my, cx, cy) && cellPlaceable(cx, cy)) {
             SDL_SetRenderDrawColor(r, 120, 220, 160, 90);
-            SDL_Rect rc{ GRID_X + cx * CELL + ox, GRID_Y + cy * CELL + oy, CELL, CELL };
+            SDL_Rect rc{ cfg.gridX + cx * cfg.cell + ox, cfg.gridY + cy * cfg.cell + oy, cfg.cell, cfg.cell };
             SDL_RenderFillRect(r, &rc);
         }
     }
@@ -1078,8 +1062,8 @@ static void renderGame(SDL_Renderer* r, double nowSec, int mx, int my) {
     for (auto& b : G.balls) {
         double fx = b.px + (b.x - b.px) * ease;
         double fy = b.py + (b.y - b.py) * ease;
-        float bx = (float)(GRID_X + fx * CELL + CELL / 2) + ox;
-        float by = (float)(GRID_Y + fy * CELL + CELL / 2) + oy;
+        float bx = (float)(cfg.gridX + fx * cfg.cell + cfg.cell / 2) + ox;
+        float by = (float)(cfg.gridY + fy * cfg.cell + cfg.cell / 2) + oy;
 
         b.hx[b.hi] = bx; b.hy[b.hi] = by;             // 残像履歴を更新
         b.hi = (b.hi + 1) % 10;
@@ -1101,12 +1085,12 @@ static void renderGame(SDL_Renderer* r, double nowSec, int mx, int my) {
 
     // ---- 右: ギミックパネル置き場 ----
     SDL_SetRenderDrawColor(r, 40, 40, 54, 255);
-    SDL_Rect pal{ 666, 140, 196, 470 };
+    SDL_Rect pal{ cfg.panelX, cfg.gridY, 196, cfg.winH - cfg.gridY - 30 };
     SDL_RenderFillRect(r, &pal);
     SDL_SetRenderDrawColor(r, 90, 90, 110, 255);
     SDL_RenderDrawRect(r, &pal);
     SDL_SetRenderDrawColor(r, 220, 220, 230, 255);
-    drawText(r, 678, 154, 2, "TILES");
+    drawText(r, cfg.panelX + 12, cfg.gridY + 14, 2, "TILES");
     for (size_t i = 0; i < G.inv.size(); i++) {
         SDL_Rect rc = paletteRect((int)i);
         SDL_SetRenderDrawColor(r, 58, 58, 76, 255);
@@ -1122,33 +1106,35 @@ static void renderGame(SDL_Renderer* r, double nowSec, int mx, int my) {
 
     // ---- ドラッグ中のタイル ----
     if (G.dragging)
-        drawTileIcon(r, G.dragType, mx - CELL / 2, my - CELL / 2, CELL, 220);
+        drawTileIcon(r, G.dragType, mx - cfg.cell / 2, my - cfg.cell / 2, cfg.cell, 220);
 
     // ---- クリア表示 ----
     if (G.cleared) {
         SDL_SetRenderDrawColor(r, 20, 20, 28, 140);
-        SDL_Rect ov{ GRID_X, GRID_Y, GRID_W * CELL, GRID_H * CELL };
+        SDL_Rect ov{ cfg.gridX, cfg.gridY, cfg.gridW * cfg.cell, cfg.gridH * cfg.cell };
         SDL_RenderFillRect(r, &ov);
         const char* msg = "CLEAR!";
         int s = 7;
         SDL_SetRenderDrawColor(r, 255, 220, 90, 255);
-        drawText(r, GRID_X + (GRID_W * CELL - textWidth(s, msg)) / 2 + ox,
-                 GRID_Y + GRID_H * CELL / 2 - 64 + oy, s, msg);
+        drawText(r, cfg.gridX + (cfg.gridW * cfg.cell - textWidth(s, msg)) / 2 + ox,
+                 cfg.gridY + cfg.gridH * cfg.cell / 2 - 64 + oy, s, msg);
         const char* msg2 = (G.curStage + 1 < (int)G.stages.size())
                                ? "N: NEXT STAGE   M: STAGE SELECT"
                                : "ALL STAGES DONE!  M: STAGE SELECT";
         SDL_SetRenderDrawColor(r, 235, 235, 240, 255);
-        drawText(r, GRID_X + (GRID_W * CELL - textWidth(2, msg2)) / 2,
-                 GRID_Y + GRID_H * CELL / 2 + 28, 2, msg2);
+        drawText(r, cfg.gridX + (cfg.gridW * cfg.cell - textWidth(2, msg2)) / 2,
+                 cfg.gridY + cfg.gridH * cfg.cell / 2 + 28, 2, msg2);
     }
 
     // ---- 下部ヘルプ ----
+    int helpY1 = cfg.gridY + cfg.gridH * cfg.cell + 12;
+    int helpY2 = cfg.gridY + cfg.gridH * cfg.cell + 38;
     SDL_SetRenderDrawColor(r, 140, 140, 158, 255);
-    drawText(r, GRID_X, 552, 2, "DRAG TILES ONTO THE BOARD");
-    drawText(r, GRID_X, 578, 2, "R: RESET   M: SELECT   -/+: VOLUME");
+    drawText(r, cfg.gridX, helpY1, 2, "DRAG TILES ONTO THE BOARD");
+    drawText(r, cfg.gridX, helpY2, 2, "R: RESET   M: SELECT   -/+: VOLUME");
     if (!g_audioOK) {
         SDL_SetRenderDrawColor(r, 220, 120, 120, 255);
-        drawText(r, 480, 578, 2, "NO AUDIO - SILENT");
+        drawText(r, cfg.gridX + cfg.gridW * cfg.cell / 2, helpY2, 2, "NO AUDIO - SILENT");
     }
 }
 
@@ -1162,7 +1148,7 @@ static void renderTitle(SDL_Renderer* r, double nowSec) {
 
     const char* title = "BEATPATH";
     int s = 9;
-    int tx = (WIN_W - textWidth(s, title)) / 2;
+    int tx = (cfg.winW - textWidth(s, title)) / 2;
     SDL_SetRenderDrawColor(r, 60, 55, 90, 255);
     drawText(r, tx + 4, 154, s, title);
     SDL_SetRenderDrawColor(r, (Uint8)(235 + 20 * pulse > 255 ? 255 : 235 + 20 * pulse), 220, 130, 255);
@@ -1170,13 +1156,13 @@ static void renderTitle(SDL_Renderer* r, double nowSec) {
 
     const char* sub = "RHYTHM TILE PUZZLE";
     SDL_SetRenderDrawColor(r, 160, 160, 180, 255);
-    drawText(r, (WIN_W - textWidth(2, sub)) / 2, 250, 2, sub);
+    drawText(r, (cfg.winW - textWidth(2, sub)) / 2, 250, 2, sub);
 
     for (int i = 0; i < 4; i++) {
-        int x = WIN_W / 2 - 66 + i * 44;
+        int x = cfg.winW / 2 - 66 + i * 44;
         if (i == G.lastBeatIdx) {
-            SDL_SetRenderDrawColor(r, 250, 200, 90, 255);
-            fillCircle(r, x, 330, (int)(12 + 5 * pulse));
+            SDL_SetRenderDrawColor(r, 220, 175, 75, 255);
+            fillCircle(r, x, 330, (int)(12 + 2 * pulse));
         } else {
             SDL_SetRenderDrawColor(r, 110, 110, 128, 255);
             drawCircle(r, x, 330, 11);
@@ -1186,11 +1172,11 @@ static void renderTitle(SDL_Renderer* r, double nowSec) {
     double blink = 0.5 + 0.5 * sin(nowSec * 3.5);
     SDL_SetRenderDrawColor(r, 235, 235, 240, (Uint8)(120 + 135 * blink));
     const char* prompt = "CLICK TO START";
-    drawText(r, (WIN_W - textWidth(3, prompt)) / 2, 420, 3, prompt);
+    drawText(r, (cfg.winW - textWidth(3, prompt)) / 2, 420, 3, prompt);
 
     SDL_SetRenderDrawColor(r, 100, 100, 118, 255);
     const char* foot = "PLACE TILES - GUIDE THE BALLS - MAKE MUSIC";
-    drawText(r, (WIN_W - textWidth(2, foot)) / 2, 500, 2, foot);
+    drawText(r, (cfg.winW - textWidth(2, foot)) / 2, 500, 2, foot);
 }
 
 // ------------------------------------------------------------
@@ -1200,7 +1186,7 @@ static void renderSelect(SDL_Renderer* r, double nowSec, int mx, int my) {
     (void)nowSec;
     SDL_SetRenderDrawColor(r, 235, 235, 240, 255);
     const char* h = "SELECT STAGE";
-    drawText(r, (WIN_W - textWidth(4, h)) / 2, 60, 4, h);
+    drawText(r, (cfg.winW - textWidth(4, h)) / 2, 60, 4, h);
 
     char buf[64];
     for (size_t i = 0; i < G.stages.size(); i++) {
@@ -1239,28 +1225,89 @@ static void renderSelect(SDL_Renderer* r, double nowSec, int mx, int my) {
 
     SDL_SetRenderDrawColor(r, 130, 130, 148, 255);
     const char* foot = "ESC: TITLE   -/+: VOLUME";
-    drawText(r, (WIN_W - textWidth(2, foot)) / 2, 530, 2, foot);
+    drawText(r, (cfg.winW - textWidth(2, foot)) / 2, 530, 2, foot);
 }
 
 // ------------------------------------------------------------
 // 背景 (拍で脈動する縦グラデーション)
 // ------------------------------------------------------------
 static void renderBackground(SDL_Renderer* r, double nowSec) {
+    SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_NONE);
     double beatMs = 60000.0 / A.bpm.load();
-    double pulse = exp(-(SDL_GetTicks() - G.lastBeatTick) / beatMs * 6.0);
+    double sinceBeat = SDL_GetTicks() - G.lastBeatTick;
+    double pulse = exp(-sinceBeat / beatMs * 6.0);
     for (int i = 0; i < 8; i++) {
         double w = sin(nowSec * 0.4 + i * 0.9) * 0.5 + 0.5;
         Uint8 base = (Uint8)(20 + i * 1.3 + 5 * w + 4 * pulse);
         SDL_SetRenderDrawColor(r, base, base, (Uint8)(base + 12), 255);
-        SDL_Rect rc{ 0, i * WIN_H / 8, WIN_W, WIN_H / 8 + 1 };
+        SDL_Rect rc{ 0, i * cfg.winH / 8, cfg.winW, cfg.winH / 8 + 1 };
         SDL_RenderFillRect(r, &rc);
     }
+    SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
+}
+
+// ------------------------------------------------------------
+// 設定ファイル (beatpath.cfg) の読み書き
+// ------------------------------------------------------------
+static void saveDefaultConfig() {
+    FILE* f = fopen("beatpath.cfg", "w");
+    if (!f) return;
+    fprintf(f,
+        "# BeatPath DX 設定ファイル\n"
+        "# 変更後はゲームを再起動してください\n"
+        "\n"
+        "# グリッド列数 (推奨: 4-12)\n"
+        "GRID_W=7\n"
+        "# グリッド行数 (推奨: 3-8)\n"
+        "GRID_H=5\n"
+        "# 1マスのピクセルサイズ in px (推奨: 60-100)\n"
+        "CELL=80\n"
+        "# 初期音量 (0-100)\n"
+        "VOLUME=80\n"
+        "# タイトル/セレクト画面のBPM\n"
+        "MENU_BPM=112\n"
+        "# 同時存在できる球の最大数\n"
+        "MAX_BALLS=64\n"
+    );
+    fclose(f);
+}
+
+static void loadConfig() {
+    FILE* f = fopen("beatpath.cfg", "r");
+    if (!f) {
+        saveDefaultConfig();
+        cfg.computeDerived();
+        return;
+    }
+    char line[256];
+    while (fgets(line, sizeof(line), f)) {
+        char* p = line;
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p == '#' || *p == '\n' || *p == '\r' || *p == '\0') continue;
+        char key[64] = {}, val[64] = {};
+        if (sscanf(p, "%63[^=\n]=%63s", key, val) == 2) {
+            // キーの末尾スペースをトリム
+            char* e = key + strlen(key) - 1;
+            while (e > key && (*e == ' ' || *e == '\t')) *e-- = '\0';
+            int v = atoi(val);
+            if      (strcmp(key, "GRID_W")    == 0) cfg.gridW    = std::max(3, std::min(20, v));
+            else if (strcmp(key, "GRID_H")    == 0) cfg.gridH    = std::max(3, std::min(15, v));
+            else if (strcmp(key, "CELL")      == 0) cfg.cell     = std::max(30, std::min(150, v));
+            else if (strcmp(key, "VOLUME")    == 0) cfg.volume   = std::max(0, std::min(100, v));
+            else if (strcmp(key, "MENU_BPM")  == 0) cfg.menuBpm  = std::max(60, std::min(240, v));
+            else if (strcmp(key, "MAX_BALLS") == 0) cfg.maxBalls = std::max(8, std::min(256, v));
+        }
+    }
+    fclose(f);
+    cfg.computeDerived();
 }
 
 // ------------------------------------------------------------
 // main
 // ------------------------------------------------------------
 int main(int, char**) {
+    loadConfig();
+
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) != 0) {
         if (SDL_Init(SDL_INIT_VIDEO) != 0) {
             fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
@@ -1270,14 +1317,14 @@ int main(int, char**) {
 
     SDL_Window* win = SDL_CreateWindow("BeatPath DX - Rhythm Tile Puzzle",
                                        SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-                                       WIN_W, WIN_H, SDL_WINDOW_SHOWN);
+                                       cfg.winW, cfg.winH, SDL_WINDOW_SHOWN);
     if (!win) { fprintf(stderr, "CreateWindow failed: %s\n", SDL_GetError()); return 1; }
+    SDL_SetWindowOpacity(win, 1.0f);
 
     SDL_Renderer* ren = SDL_CreateRenderer(win, -1,
                           SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
     if (!ren) ren = SDL_CreateRenderer(win, -1, 0);
     if (!ren) { fprintf(stderr, "CreateRenderer failed: %s\n", SDL_GetError()); return 1; }
-    SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
 
     SDL_AudioSpec want, have;
     SDL_zero(want);
@@ -1294,6 +1341,8 @@ int main(int, char**) {
     } else {
         fprintf(stderr, "Audio unavailable (%s) - running silent.\n", SDL_GetError());
     }
+
+    A.vol100.store(cfg.volume);
 
     loadProgress();
     enterMenuMusic();
@@ -1403,6 +1452,9 @@ int main(int, char**) {
         // ---- 描画 ----
         int mx, my;
         SDL_GetMouseState(&mx, &my);
+        SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_NONE);
+        SDL_SetRenderDrawColor(ren, 20, 20, 28, 255);
+        SDL_RenderClear(ren);
         renderBackground(ren, nowSec);
         if (G.scene == SC_TITLE)       renderTitle(ren, nowSec);
         else if (G.scene == SC_SELECT) renderSelect(ren, nowSec, mx, my);
