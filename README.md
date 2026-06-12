@@ -1,36 +1,18 @@
 # BeatPath DX - リズム × タイル配置パズル
 
-インタラクティブミュージック要素を取り入れたタイル配置型パズルゲームの完全版です。
-C++17 / SDL2、単一ソースファイル、外部アセット不要(音はすべてリアルタイム合成)。
+**▶ ブラウザで今すぐ遊ぶ: https://qyuweriot.github.io/BeatPath/**
 
-## ビルドと実行
+> タイルを置くたびに音楽が重なっていく、インタラクティブミュージック型パズルゲーム。  
+> C++17 / SDL2 製。外部アセット不要（音はすべてリアルタイム合成）。
 
-### macOS (Apple Silicon / Homebrew)
-```bash
-brew install sdl2
-make && ./beatpath
-```
-※ `/usr/local` にIntel版SDL2しか無い場合は `make SDL2_CONFIG=/opt/homebrew/bin/sdl2-config`、
-   またはRosetta向けに `c++ -arch x86_64 ...` でビルドしてください(Makefileは/opt/homebrewを自動優先)。
-
-### Ubuntu / Debian
-```bash
-sudo apt install g++ make libsdl2-dev
-make && ./beatpath
-```
-
-### Windows (MSYS2 / MinGW64)
-```bash
-pacman -S mingw-w64-x86_64-gcc mingw-w64-x86_64-SDL2 make
-make && ./beatpath.exe
-```
+---
 
 ## 遊び方
 
 - 常にリズム(キック)が刻まれ、**毎小節の頭にスタート(緑▶)から球が発射**されます
 - 球は **1拍ごとに1マス直進**。ギミックタイルを通ると効果が発動し、音が鳴ります
 - 右のパネル置き場から盤面へ **ドラッグ&ドロップ** で配置(取り上げ・置き直し自由)
-- **全ゴールを同じ小節幅の間に同時点灯させるとクリア**
+- **小節頭で全ゴールが同時点灯するとクリア**
 - クリア後も発射は続き、完成した曲がそのままループします
 
 ### 操作
@@ -46,16 +28,15 @@ make && ./beatpath.exe
 
 | タイル | 効果 | 音 |
 |---|---|---|
-| TURN R / TURN L | 右折 / 左折 | 低めの撥弦音 |
-| SPLIT | 左右に二分裂 | 高い音 |
-| SPLIT 3 | 直進+左右の三分裂 | さらに高い音 |
-| SPEED X2 | 1拍で2マス進む | 高速プリング |
-| SLOW | 2拍で1マス進む | 低い音 |
-| STOP 1 | 1拍停止 | ミュートクリック |
-| PAINT (赤/青/黄) | 球に色を付ける = **音色が変わる** | 色別のベル |
+| TURN R | 右折 | スネア (C4) |
+| TURN L | 左折 | スネア (E4) |
+| SPLIT | 左右に二分裂 | マリンバ (E5) |
+| SPLIT 3 | 直進+左右の三分裂 | マリンバ (G5) |
+| SPEED X2 | 1拍で2マス進む | タム (G3) |
+| STOP 1 | 1拍停止 | タム (G3、低め) |
+| PAINT (赤/青/黄) | 白い球（未着色）に色を付ける | オルガン (R=C5 / B=E5 / Y=G5) |
 
 ### ステージ側の要素
-- **壁**: 球をぶつけると破壊できる(スネアが鳴る=打楽器として使える)
 - **ワープ**: 入口と出口のセット。通ると上昇スイープ音
 - **色付きゴール**: 同じ色の球だけが点灯させられる(白い球は素通り)
 - **複数スタート**: 同時に複数の球が走る
@@ -65,30 +46,62 @@ make && ./beatpath.exe
 | # | 名前 | 拍子 | テーマ |
 |---|---|---|---|
 | 1 | FIRST STEPS | 4 | 曲がる |
-| 2 | SPLIT | 6 | 分裂で2ゴール同時 |
-| 3 | TRIPLE | 8 | 三分裂で3ゴール |
-| 4 | BREAK | 4 | 壁を球で破壊して道を作る |
-| 5 | WARP | 6 | ワープを経由 |
+| 2 | SPLIT | 4 | 分裂で2ゴール同時 |
+| 3 | SPEED | 4 | 加速して2ゴール |
+| 4 | TRIPLE | 6 | 三分裂で3ゴール |
+| 5 | WARP | 4 | ワープを経由 |
 | 6 | COLORS | 6 | ペイントして同色ゴールへ |
-| 7 | DUET | 8 | 2つのスタート×3ゴール |
-| 8 | FINALE | 8 | 壁+ワープ+色+速度系の総決算 |
+| 7 | DUET | 8 | 2スタート×5ゴール |
+| 8 | FINALE | 8 | ワープ+色+速度系の総決算 |
 
-クリア状況は `beatpath_save.dat` に自動保存され、次のステージがアンロックされます。
+クリア状況はブラウザ版では `localStorage` に、ネイティブ版では `beatpath_save.dat` に自動保存されます。
 
 ## インタラクティブミュージックの仕組み
 
-- **5レイヤー構成**: キック(常時) → 8分ハット → ベース+コードパッド → メロディ
-  - タイルを置く/発動させる → ハット追加
-  - 一度でもゴール到達 → ベースとパッド追加
+- **5レイヤー構成**: キック(常時) → 8分ハット → ベース → コードパッド → メロディ
+  - 球が生存している間 → ハット追加
+  - タイルを1枚置く → ベース追加
+  - タイルを2枚以上置く → コードパッド追加
   - クリア → メロディ追加+クリアコード
 - **Am → F → C → G の4小節コード進行**(画面上部に現在のコードを表示)
-- **球の色で音色が変わる**: 白=撥弦 / 赤=スクエア / 青=サイン / 黄=トライアングル
-- **球が3個以上**になると16分シェイカーが追加される(球数でレイヤーが増える)
-- 壁破壊=スネア、ワープ=スイープと、**ステージ要素自体が打楽器・効果音**になる
+- **球が2個以上**になると16分シェイカーが追加される(球数でレイヤーが増える)
+- ワープ=スイープと、**ステージ要素自体が効果音**になる
 - 拍はオーディオスレッドのサンプル精度カウンタで駆動するため音とズレません
 - ドラッグ&ドロップにも取る/置く/戻すで音程の違うクリック音
 
-## 拡張ポイント
+---
 
-新ギミックは (1) `TileType` 追加 → (2) `processCell()` に効果+発音 →
-(3) `drawTileIcon()` にアイコン → (4) `makeStages()` でステージに投入、の4箇所で完結します。
+## ビルド方法 (ローカル実行)
+
+### macOS (Apple Silicon / Homebrew)
+```bash
+brew install sdl2
+make && ./beatpath
+```
+※ `/usr/local` にIntel版SDL2しか無い場合は `make SDL2_CONFIG=/opt/homebrew/bin/sdl2-config`
+
+### Ubuntu / Debian
+```bash
+sudo apt install g++ make libsdl2-dev
+make && ./beatpath
+```
+
+### Windows (MSYS2 / MinGW64)
+```bash
+pacman -S mingw-w64-x86_64-gcc mingw-w64-x86_64-SDL2 make
+make && ./beatpath.exe
+```
+
+### Web ブラウザ (Emscripten)
+```bash
+# Emscripten のインストール (初回のみ)
+git clone https://github.com/emscripten-core/emsdk.git ~/emsdk
+cd ~/emsdk && ./emsdk install latest && ./emsdk activate latest
+source ~/emsdk/emsdk_env.sh
+
+# ビルド → docs/ に index.html / index.js / index.wasm が生成される
+make -f Makefile.em
+
+# ローカル確認
+npx serve docs
+```
