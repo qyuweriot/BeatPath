@@ -9,7 +9,7 @@
 //
 //  ギミック: 右折 / 左折 / 二分裂 / 三分裂 / 加速(2倍) / 減速(1/2)
 //            / 1拍停止 / ペイント(球の色変更=音色変更)
-//  ステージ要素: 破壊できる壁(スネア) / ワープ / 色付きゴール / 複数スタート
+//  ステージ要素: ワープ / 色付きゴール / 複数スタート
 //
 //  音楽: キック+8分ハット+ベース+パッド+メロディの5レイヤー
 //        Am -> F -> C -> G の4小節コード進行 / 球の色で音色が変化
@@ -158,6 +158,7 @@ static void audioCallback(void*, Uint8* stream, int len) {
             int  idx  = (int)(beatNum % bpmeas);
             int  prog = (int)((beatNum / bpmeas) % 4);          // コード進行位置
             addVoiceRaw(V_KICK, 0, idx == 0 ? KICK_AMP_DOWN : KICK_AMP_WEAK);
+            if (idx == 0) addVoiceRaw(V_RIDE, 0, CRASH_AMP);   // 小節頭シンバル
             if (layer & 2) {                                     // ベース (1枚以上設置)
                 if (idx == 0) {
                     addVoiceRaw(V_BASS, BASS_ROOT[prog], BASS_AMP_ROOT);
@@ -288,6 +289,32 @@ static void audioCallback(void*, Uint8* stream, int len) {
                     s = shimmer * exp(-v.t * 8.0) * 0.30 * v.amp;
                     if (v.t > 0.7) v.active = false;
                 } break;
+                case V_MARIMBA2: { // タンタン (16分音符 2打)
+                    v.phase += 2.0 * M_PI * v.freq / sr;
+                    double dt = 60.0 / (A.bpm.load() * 4.0);
+                    double e1 = exp(-v.t * 16.0);
+                    double e2 = v.t > dt ? exp(-(v.t - dt) * 16.0) : 0.0;
+                    double h1 = exp(-v.t * 50.0);
+                    double h2 = v.t > dt ? exp(-(v.t - dt) * 50.0) : 0.0;
+                    s = (sin(v.phase) * (e1 + e2)
+                         + 0.15 * sin(4.0 * v.phase) * (h1 + h2))
+                        * 0.5 * v.amp;
+                    if (v.t > 2.0 * dt + 0.25) v.active = false;
+                } break;
+                case V_MARIMBA3: { // タタタン (拍を4等分して前3打、4打目は休符)
+                    v.phase += 2.0 * M_PI * v.freq / sr;
+                    double dt = 60.0 / (A.bpm.load() * 4.0);
+                    double e1 = exp(-v.t * 16.0);
+                    double e2 = v.t > dt     ? exp(-(v.t - dt)     * 16.0) : 0.0;
+                    double e3 = v.t > 2.0*dt ? exp(-(v.t - 2.0*dt) * 16.0) : 0.0;
+                    double h1 = exp(-v.t * 50.0);
+                    double h2 = v.t > dt     ? exp(-(v.t - dt)     * 50.0) : 0.0;
+                    double h3 = v.t > 2.0*dt ? exp(-(v.t - 2.0*dt) * 50.0) : 0.0;
+                    s = (sin(v.phase) * (e1 * 0.85 + e2 * 0.85 + e3)
+                         + 0.15 * sin(4.0 * v.phase) * (h1 * 0.85 + h2 * 0.85 + h3))
+                        * 0.5 * v.amp;
+                    if (v.t > 3.0 * dt + 0.25) v.active = false;
+                } break;
             }
             v.t += 1.0 / sr;
             mix += s;
@@ -368,25 +395,34 @@ static void drawCircle(SDL_Renderer* r, int cx, int cy, int rad) {
                               (int)(cx + rad * cos(a1)), (int)(cy + rad * sin(a1)));
     }
 }
+static void drawThickLine(SDL_Renderer* r, int x1, int y1, int x2, int y2, int w = 2) {
+    double dx = x2 - x1, dy = y2 - y1;
+    double len = std::sqrt(dx*dx + dy*dy);
+    if (len < 0.5) return;
+    double px = -dy/len, py = dx/len;
+    for (int i = -(w/2); i <= w/2; i++)
+        SDL_RenderDrawLine(r, (int)(x1+i*px+.5), (int)(y1+i*py+.5),
+                              (int)(x2+i*px+.5), (int)(y2+i*py+.5));
+}
 static void drawArrowHead(SDL_Renderer* r, double px, double py, double angle) {
     double l = 9;
-    SDL_RenderDrawLine(r, (int)px, (int)py,
-                       (int)(px + l * cos(angle + 2.6)), (int)(py + l * sin(angle + 2.6)));
-    SDL_RenderDrawLine(r, (int)px, (int)py,
-                       (int)(px + l * cos(angle - 2.6)), (int)(py + l * sin(angle - 2.6)));
+    drawThickLine(r, (int)px, (int)py,
+                  (int)(px + l * cos(angle + 2.6)), (int)(py + l * sin(angle + 2.6)));
+    drawThickLine(r, (int)px, (int)py,
+                  (int)(px + l * cos(angle - 2.6)), (int)(py + l * sin(angle - 2.6)));
 }
 static void drawArc(SDL_Renderer* r, double cx, double cy, double rad, double a0, double a1) {
     const int N = 28;
     for (int i = 0; i < N; i++) {
         double t0 = a0 + (a1 - a0) * i / N;
         double t1 = a0 + (a1 - a0) * (i + 1) / N;
-        SDL_RenderDrawLine(r, (int)(cx + rad * cos(t0)), (int)(cy + rad * sin(t0)),
-                              (int)(cx + rad * cos(t1)), (int)(cy + rad * sin(t1)));
+        drawThickLine(r, (int)(cx + rad * cos(t0)), (int)(cy + rad * sin(t0)),
+                         (int)(cx + rad * cos(t1)), (int)(cy + rad * sin(t1)));
     }
 }
 static void drawChevron(SDL_Renderer* r, double cx, double cy, double s) {
-    SDL_RenderDrawLine(r, (int)(cx - s), (int)(cy - s), (int)(cx + s * 0.4), (int)cy);
-    SDL_RenderDrawLine(r, (int)(cx + s * 0.4), (int)cy, (int)(cx - s), (int)(cy + s));
+    drawThickLine(r, (int)(cx - s), (int)(cy - s), (int)(cx + s * 0.4), (int)cy);
+    drawThickLine(r, (int)(cx + s * 0.4), (int)cy, (int)(cx - s), (int)(cy + s));
 }
 
 static void tileColor(TileType t, Uint8& cr, Uint8& cg, Uint8& cb) {
@@ -431,16 +467,16 @@ static void drawTileIcon(SDL_Renderer* r, TileType t, int x, int y, int size, Ui
             drawArrowHead(r, cx + s * cos(a1), cy + s * sin(a1), a1 - M_PI / 2);
         } break;
         case T_SPLIT: {
-            SDL_RenderDrawLine(r, (int)(cx - s), (int)cy, (int)cx, (int)cy);
-            SDL_RenderDrawLine(r, (int)cx, (int)cy, (int)cx, (int)(cy - s));
-            SDL_RenderDrawLine(r, (int)cx, (int)cy, (int)cx, (int)(cy + s));
+            drawThickLine(r, (int)(cx - s), (int)cy, (int)cx, (int)cy);
+            drawThickLine(r, (int)cx, (int)cy, (int)cx, (int)(cy - s));
+            drawThickLine(r, (int)cx, (int)cy, (int)cx, (int)(cy + s));
             drawArrowHead(r, cx, cy - s, -M_PI / 2);
             drawArrowHead(r, cx, cy + s,  M_PI / 2);
         } break;
         case T_SPLIT3: {
-            SDL_RenderDrawLine(r, (int)(cx - s), (int)cy, (int)(cx + s), (int)cy);
-            SDL_RenderDrawLine(r, (int)cx, (int)cy, (int)cx, (int)(cy - s));
-            SDL_RenderDrawLine(r, (int)cx, (int)cy, (int)cx, (int)(cy + s));
+            drawThickLine(r, (int)(cx - s), (int)cy, (int)(cx + s), (int)cy);
+            drawThickLine(r, (int)cx, (int)cy, (int)cx, (int)(cy - s));
+            drawThickLine(r, (int)cx, (int)cy, (int)cx, (int)(cy + s));
             drawArrowHead(r, cx + s, cy, 0);
             drawArrowHead(r, cx, cy - s, -M_PI / 2);
             drawArrowHead(r, cx, cy + s,  M_PI / 2);
@@ -477,6 +513,8 @@ struct Ball {
     int speed = 1;           // 2 = 1拍2マス
     bool slow = false;       // 2拍1マス
     bool slowPhase = false;
+    bool oneTimeFast = false; // 次の1拍だけ2倍速
+    bool oneTimeSlow = false; // 次の1拍だけスキップ(半速)
     int stopBeats = 0;       // 残り停止拍数
     bool alive = true;
     float hx[10], hy[10];    // 残像用の描画位置履歴
@@ -484,7 +522,6 @@ struct Ball {
 };
 
 
-struct Wall { int x, y; bool alive; };
 struct Flash { int x, y; double t; };
 struct Particle { float x, y, vx, vy, life, max; Uint8 r, g, b; };
 
@@ -499,7 +536,6 @@ struct Game {
     std::vector<Ball> balls;
     std::vector<int>  goalLit;
     std::vector<bool> goalHitAtHead;
-    std::vector<Wall> walls;
     std::vector<std::pair<TileType, int>> inv;
     std::vector<Flash> flashes;
     std::vector<Particle> parts;
@@ -565,11 +601,6 @@ static int goalIndexAt(int cx, int cy) {
     }
     return -1;
 }
-static int wallIndexAt(int cx, int cy) {
-    for (size_t i = 0; i < G.walls.size(); i++)
-        if (G.walls[i].alive && G.walls[i].x == cx && G.walls[i].y == cy) return (int)i;
-    return -1;
-}
 static bool warpAt(int cx, int cy, int& ox, int& oy) {
     for (auto& w : stage().warps) {
         if (w.x1 == cx && w.y1 == cy) { ox = w.x2; oy = w.y2; return true; }
@@ -580,7 +611,7 @@ static bool warpAt(int cx, int cy, int& ox, int& oy) {
 static bool isWarpCell(int cx, int cy) { int a, b; return warpAt(cx, cy, a, b); }
 static bool cellPlaceable(int cx, int cy) {
     return G.grid[cy][cx] == T_EMPTY && !isStart(cx, cy) &&
-           goalIndexAt(cx, cy) < 0 && wallIndexAt(cx, cy) < 0 && !isWarpCell(cx, cy);
+           goalIndexAt(cx, cy) < 0 && !isWarpCell(cx, cy);
 }
 
 static void spawnBurst(double px, double py, int n, Uint8 r, Uint8 g, Uint8 b, double speed) {
@@ -624,10 +655,6 @@ static void loadStage(int idx) {
     G.inv = stage().inv;
     G.goalLit.assign(stage().goals.size(), 0);
     G.goalHitAtHead.assign(stage().goals.size(), false);
-    G.walls.clear();
-    for (auto& w : stage().walls)
-        if (w.x < cfg.gridW && w.y < cfg.gridH)
-            G.walls.push_back({w.x, w.y, true});
     G.cleared = false;
     G.everTriggered = false;
     G.goalsEverHit = 0;
@@ -665,17 +692,6 @@ static bool processCell(Ball& b, std::vector<Ball>& newBalls) {
     if (b.x < 0 || b.x >= cfg.gridW || b.y < 0 || b.y >= cfg.gridH) {
         b.alive = false;
         addVoice(SND_BALL_OUT.voice, SND_BALL_OUT.freq, SND_BALL_OUT.amp);
-        return false;
-    }
-    // 壁: ぶつけて破壊 (スネア)
-    int wi = wallIndexAt(b.x, b.y);
-    if (wi >= 0) {
-        G.walls[wi].alive = false;
-        b.alive = false;
-        addVoice(SND_WALL_BREAK.voice, SND_WALL_BREAK.freq, SND_WALL_BREAK.amp);
-        cellBurst(b.x, b.y, 150, 145, 160, 16, 220);
-        G.flashes.push_back({b.x, b.y, 0});
-        G.everTriggered = true;
         return false;
     }
     // ゴール: 色が一致すれば点灯、不一致は素通り
@@ -741,9 +757,9 @@ static bool processCell(Ball& b, std::vector<Ball>& newBalls) {
             newBalls.push_back(rgt);
             addVoice(TILE_SOUNDS[t].voice, TILE_SOUNDS[t].freq, TILE_SOUNDS[t].amp, w);
         } break;
-        case T_SPEED2: { b.speed = 2; b.slow = false;
+        case T_SPEED2: { b.oneTimeFast = true;
                          addVoice(TILE_SOUNDS[t].voice, TILE_SOUNDS[t].freq, TILE_SOUNDS[t].amp, w); } break;
-        case T_SLOW:   { b.speed = 1; b.slow = true; b.slowPhase = true;
+        case T_SLOW:   { b.oneTimeSlow = true;
                          addVoice(TILE_SOUNDS[t].voice, TILE_SOUNDS[t].freq, TILE_SOUNDS[t].amp, w); } break;
         case T_STOP:   { b.stopBeats = 1;
                          addVoice(TILE_SOUNDS[t].voice, TILE_SOUNDS[t].freq, TILE_SOUNDS[t].amp); } break;
@@ -780,6 +796,14 @@ static void onBeat() {
         if (!b.alive) continue;
         b.px = b.x; b.py = b.y;
         if (b.stopBeats > 0) { b.stopBeats--; continue; }       // 1拍停止
+        if (b.oneTimeSlow) { b.oneTimeSlow = false; continue; } // 次の1拍だけスキップ
+        if (b.oneTimeFast) {                                    // 1マス先をスキップして2マス先へジャンプ
+            b.oneTimeFast = false;
+            b.x += b.dx; b.y += b.dy;  // 1マス先: 座標のみ(壁・ギミック無視)
+            b.x += b.dx; b.y += b.dy;  // 2マス先: 通常処理
+            processCell(b, newBalls);
+            continue;
+        }
         if (b.slow) {                                           // 0.5倍速
             b.slowPhase = !b.slowPhase;
             if (!b.slowPhase) continue;
@@ -968,8 +992,17 @@ static void renderGame(SDL_Renderer* r, double nowSec, int mx, int my) {
     snprintf(buf, sizeof(buf), "VOL %d", A.vol100.load());
     SDL_SetRenderDrawColor(r, 110, 110, 128, 255);
     drawText(r, meterX, 58, 1, buf);
+    {
+        long _pb = G.processedBeats > 0 ? G.processedBeats - 1 : 0;
+        int prog = (int)((_pb / bpmeas) % 4);
+        for (int c = 0; c < 4; c++) {
+            if (c == prog) SDL_SetRenderDrawColor(r, 235, 235, 240, 255);
+            else           SDL_SetRenderDrawColor(r, 85, 85, 100, 255);
+            drawText(r, meterX + c * 28, 72, 2, CHORD_NAME[c]);
+        }
+    }
 
-    // ---- 拍子インジケータ + コード表示 ----
+    // ---- 拍子インジケータ ----
     int bcx = cfg.gridX + cfg.gridW * cfg.cell / 2 - (bpmeas - 1) * 22 + ox;
     int bcy = 96 + oy;
     for (int i = 0; i < bpmeas; i++) {
@@ -982,14 +1015,6 @@ static void renderGame(SDL_Renderer* r, double nowSec, int mx, int my) {
             drawCircle(r, x, bcy, 12);
         }
     }
-    long _pb = G.processedBeats > 0 ? G.processedBeats - 1 : 0;
-    int prog = (int)((_pb / bpmeas) % 4);
-    for (int c = 0; c < 4; c++) {
-        if (c == prog) SDL_SetRenderDrawColor(r, 235, 235, 240, 255);
-        else           SDL_SetRenderDrawColor(r, 85, 85, 100, 255);
-        drawText(r, cfg.gridX + cfg.gridW * cfg.cell - 110 + c * 28 + ox, 88 + oy, 2, CHORD_NAME[c]);
-    }
-
     // ---- 市松盤面 (拍でほんのり明滅) ----
     int bright = (int)(3 * pulse);
     for (int y = 0; y < cfg.gridH; y++)
@@ -1042,20 +1067,6 @@ static void renderGame(SDL_Renderer* r, double nowSec, int mx, int my) {
         SDL_Rect rc2{ rc.x + 6, rc.y + 6, rc.w - 12, rc.h - 12 };
         SDL_RenderDrawRect(r, &rc2);
         if (g.color >= 0) fillCircle(r, rc.x + rc.w / 2, rc.y + rc.h / 2, 8);
-    }
-
-    // ---- 壁 ----
-    for (auto& w : G.walls) {
-        if (!w.alive) continue;
-        SDL_Rect rc{ cfg.gridX + w.x * cfg.cell + 6 + ox, cfg.gridY + w.y * cfg.cell + 6 + oy,
-                     cfg.cell - 12, cfg.cell - 12 };
-        SDL_SetRenderDrawColor(r, 72, 70, 84, 255);
-        SDL_RenderFillRect(r, &rc);
-        SDL_SetRenderDrawColor(r, 120, 116, 136, 255);
-        SDL_RenderDrawRect(r, &rc);
-        SDL_RenderDrawLine(r, rc.x + 8, rc.y + rc.h / 2, rc.x + rc.w / 2, rc.y + 10);
-        SDL_RenderDrawLine(r, rc.x + rc.w / 2, rc.y + 10, rc.x + rc.w - 12, rc.y + rc.h - 12);
-        SDL_RenderDrawLine(r, rc.x + rc.w / 2, rc.y + rc.h - 8, rc.x + rc.w / 2 + 10, rc.y + rc.h / 2);
     }
 
     // ---- ワープ (回転する渦) ----
