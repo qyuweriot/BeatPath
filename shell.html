@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=1280">
+  <title>BeatPath DX - Rhythm Tile Puzzle</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      background: #14141c;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: flex-start;
+      min-height: 100vh;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      color: #ccc;
+      overflow-x: auto;
+    }
+
+    #canvas {
+      display: block;
+    }
+
+    /* ゲーム起動前に表示するオーバーレイ */
+    #overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(14, 14, 22, 0.95);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      z-index: 10;
+      gap: 16px;
+    }
+
+    #overlay h1 {
+      font-size: 2.2rem;
+      color: #eee;
+      letter-spacing: 0.15em;
+      font-weight: 300;
+    }
+
+    #overlay .subtitle {
+      font-size: 0.95rem;
+      color: #8080a0;
+      letter-spacing: 0.05em;
+    }
+
+    #overlay .start-btn {
+      margin-top: 16px;
+      padding: 12px 40px;
+      border: 1px solid #5555aa;
+      border-radius: 4px;
+      font-size: 1rem;
+      color: #aaaaff;
+      letter-spacing: 0.1em;
+      background: rgba(80, 80, 160, 0.15);
+    }
+
+    #overlay:hover .start-btn {
+      background: rgba(80, 80, 160, 0.3);
+      border-color: #8888cc;
+      color: #ccccff;
+    }
+
+    #status {
+      font-size: 0.8rem;
+      color: #555;
+      margin-top: 8px;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- クリックで音声コンテキストを起動するオーバーレイ -->
+  <div id="overlay">
+    <h1>BeatPath DX</h1>
+    <div class="subtitle">Rhythm Tile Puzzle</div>
+    <div class="start-btn">▶ クリックして開始 / Click to Play</div>
+    <div id="status">読み込み中... / Loading...</div>
+  </div>
+
+  <canvas id="canvas" oncontextmenu="event.preventDefault()"></canvas>
+
+  <script type="text/javascript">
+    var statusEl = document.getElementById('status');
+    var overlayEl = document.getElementById('overlay');
+
+    var Module = {
+      canvas: document.getElementById('canvas'),
+
+      // ロード進捗を表示
+      setStatus: function(text) {
+        if (!text) return;
+        statusEl.textContent = text;
+      },
+
+      print: function(text) { console.log(text); },
+      printErr: function(text) { console.error(text); },
+
+      onRuntimeInitialized: function() {
+        statusEl.textContent = 'クリックして開始 / Click to play';
+      },
+
+      // メモリ不足エラー
+      onAbort: function(what) {
+        statusEl.textContent = 'エラー: ' + what;
+      },
+    };
+
+    // オーバーレイクリックでゲーム開始 & 音声コンテキスト起動
+    overlayEl.addEventListener('click', function() {
+      overlayEl.style.display = 'none';
+
+      // ブラウザの音声制限を解除するためにダミーの AudioContext を作成
+      try {
+        var AudioContext = window.AudioContext || window.webkitAudioContext;
+        if (AudioContext) {
+          var tmpCtx = new AudioContext();
+          tmpCtx.resume().then(function() { tmpCtx.close(); });
+        }
+      } catch(e) {}
+    }, { once: true });
+  </script>
+
+  {{{ SCRIPT }}}
+</body>
+</html>

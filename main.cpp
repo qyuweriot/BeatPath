@@ -20,6 +20,9 @@
 // ============================================================
 
 #include <SDL2/SDL.h>
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#endif
 #include <algorithm>
 #include <atomic>
 #include <cctype>
@@ -550,6 +553,11 @@ static Game G;
 static double g_fallbackAccum = 0;
 static long   g_fallbackBeats = 0;
 
+static SDL_Window*   g_win      = nullptr;
+static SDL_Renderer* g_ren      = nullptr;
+static bool          g_running  = true;
+static Uint32        g_prevTicks = 0;
+
 static const StageDef& stage() { return G.stages[G.curStage]; }
 
 // ------------------------------------------------------------
@@ -558,13 +566,31 @@ static const StageDef& stage() { return G.stages[G.curStage]; }
 static const char* SAVE_FILE = "beatpath_save.dat";
 
 static void saveProgress() {
+#ifdef __EMSCRIPTEN__
+    std::string data;
+    for (bool c : G.clearedStages) data += (c ? '1' : '0');
+    EM_ASM({ localStorage.setItem('beatpath_save', UTF8ToString($0)); },
+           data.c_str());
+#else
     FILE* f = fopen(SAVE_FILE, "w");
     if (!f) return;
     for (bool c : G.clearedStages) fputc(c ? '1' : '0', f);
     fclose(f);
+#endif
 }
 static void loadProgress() {
     G.clearedStages.assign(G.stages.size(), false);
+#ifdef __EMSCRIPTEN__
+    char* raw = (char*)EM_ASM_PTR({
+        var s = localStorage.getItem('beatpath_save') || '';
+        var buf = _malloc(s.length + 1);
+        stringToUTF8(s, buf, s.length + 1);
+        return buf;
+    });
+    for (size_t i = 0; i < G.clearedStages.size() && raw[i]; i++)
+        G.clearedStages[i] = (raw[i] == '1');
+    free(raw);
+#else
     FILE* f = fopen(SAVE_FILE, "r");
     if (!f) return;
     for (size_t i = 0; i < G.clearedStages.size(); i++) {
@@ -573,6 +599,7 @@ static void loadProgress() {
         G.clearedStages[i] = (c == '1');
     }
     fclose(f);
+#endif
 }
 static bool stageUnlocked(int i) {
     return i == 0 || G.clearedStages[i - 1];
@@ -1320,6 +1347,10 @@ static void saveDefaultConfig() {
 }
 
 static void loadConfig() {
+#ifdef __EMSCRIPTEN__
+    cfg.computeDerived();
+    return;
+#endif
     FILE* f = fopen("beatpath.cfg", "r");
     if (!f) {
         saveDefaultConfig();
@@ -1348,6 +1379,132 @@ static void loadConfig() {
 }
 
 // ------------------------------------------------------------
+// メインループの 1 フレーム分処理 (Emscripten 用に切り出し)
+// ------------------------------------------------------------
+static void mainLoopIteration() {
+    SDL_Event e;
+    while (SDL_PollEvent(&e)) {
+        if (e.type == SDL_QUIT) {
+            g_running = false;
+#ifdef __EMSCRIPTEN__
+            emscripten_cancel_main_loop();
+#endif
+            return;
+        }
+
+        if (e.type == SDL_KEYDOWN) {
+            SDL_Keycode k = e.key.keysym.sym;
+            if (k == SDLK_MINUS)
+                A.vol100.store(std::max(0, A.vol100.load() - 10));
+            else if (k == SDLK_EQUALS || k == SDLK_PLUS)
+                A.vol100.store(std::min(100, A.vol100.load() + 10));
+
+            if (G.scene == SC_TITLE) {
+#ifndef __EMSCRIPTEN__
+                if (k == SDLK_ESCAPE) { g_running = false; return; }
+#endif
+                if (k == SDLK_RETURN || k == SDLK_SPACE) { G.scene = SC_SELECT; addVoice(SND_UI_ENTER.voice, SND_UI_ENTER.freq, SND_UI_ENTER.amp); }
+            } else if (G.scene == SC_SELECT) {
+                if (k == SDLK_ESCAPE) G.scene = SC_TITLE;
+            } else { // SC_GAME
+                if (k == SDLK_ESCAPE || k == SDLK_m) {
+                    G.scene = SC_SELECT;
+                    enterMenuMusic();
+                } else if (k == SDLK_r) {
+                    loadStage(G.curStage);
+                } else if (k == SDLK_n && G.cleared) {
+                    if (G.curStage + 1 < (int)G.stages.size())
+                        loadStage(G.curStage + 1);
+                    else { G.scene = SC_SELECT; enterMenuMusic(); }
+                }
+            }
+        } else if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT) {
+            int mx = e.button.x, my = e.button.y;
+            if (G.scene == SC_TITLE) {
+                G.scene = SC_SELECT;
+                addVoice(SND_UI_ENTER.voice, SND_UI_ENTER.freq, SND_UI_ENTER.amp);
+            } else if (G.scene == SC_SELECT) {
+                for (size_t i = 0; i < G.stages.size(); i++) {
+                    SDL_Rect rc = selectRect((int)i);
+                    SDL_Point p{ mx, my };
+                    if (SDL_PointInRect(&p, &rc)) {
+                        if (stageUnlocked((int)i)) {
+                            addVoice(SND_UI_SELECT_OK.voice, SND_UI_SELECT_OK.freq, SND_UI_SELECT_OK.amp);
+                            loadStage((int)i);
+                        } else {
+                            addVoice(SND_UI_SELECT_LOCK.voice, SND_UI_SELECT_LOCK.freq, SND_UI_SELECT_LOCK.amp);
+                        }
+                        break;
+                    }
+                }
+            } else {
+                gameMouseDown(mx, my);
+            }
+        } else if (e.type == SDL_MOUSEBUTTONUP && e.button.button == SDL_BUTTON_LEFT) {
+            if (G.scene == SC_GAME) gameMouseUp(e.button.x, e.button.y);
+        }
+    }
+
+    Uint32 now = SDL_GetTicks();
+    double dt = (now - g_prevTicks) / 1000.0;
+    g_prevTicks = now;
+    double nowSec = now / 1000.0;
+
+    // オーディオが無い環境では時間で拍を刻む
+    if (!g_audioOK) {
+        g_fallbackAccum += dt * 1000.0;
+        double beatMs = 60000.0 / A.bpm.load();
+        while (g_fallbackAccum >= beatMs) {
+            g_fallbackAccum -= beatMs;
+            g_fallbackBeats++;
+        }
+    }
+
+    long tb = g_audioOK ? A.totalBeats.load() : g_fallbackBeats;
+    while (G.processedBeats < tb) {
+        if (G.scene == SC_GAME) {
+            onBeat();
+        } else {
+            G.lastBeatIdx = (int)(G.processedBeats % A.beatsPM.load());
+            G.lastBeatTick = SDL_GetTicks();
+            G.shake = 1.5;
+        }
+        G.processedBeats++;
+    }
+
+    // ---- エフェクト更新 ----
+    for (auto& f : G.flashes) f.t += dt;
+    G.flashes.erase(std::remove_if(G.flashes.begin(), G.flashes.end(),
+                                   [](const Flash& f){ return f.t > 0.35; }),
+                    G.flashes.end());
+    for (auto& p : G.parts) {
+        p.x += p.vx * (float)dt;
+        p.y += p.vy * (float)dt;
+        p.vy += 320.0f * (float)dt;
+        p.life -= (float)dt;
+    }
+    G.parts.erase(std::remove_if(G.parts.begin(), G.parts.end(),
+                                 [](const Particle& p){ return p.life <= 0; }),
+                  G.parts.end());
+    G.shake *= pow(0.001, dt);
+
+    // ---- 描画 ----
+    int mx, my;
+    SDL_GetMouseState(&mx, &my);
+    SDL_SetRenderDrawBlendMode(g_ren, SDL_BLENDMODE_NONE);
+    SDL_SetRenderDrawColor(g_ren, 20, 20, 28, 255);
+    SDL_RenderClear(g_ren);
+    renderBackground(g_ren, nowSec);
+    if (G.scene == SC_TITLE)       renderTitle(g_ren, nowSec);
+    else if (G.scene == SC_SELECT) renderSelect(g_ren, nowSec, mx, my);
+    else                           renderGame(g_ren, nowSec, mx, my);
+    SDL_RenderPresent(g_ren);
+#ifndef __EMSCRIPTEN__
+    SDL_Delay(1);
+#endif
+}
+
+// ------------------------------------------------------------
 // main
 // ------------------------------------------------------------
 int main(int, char**) {
@@ -1360,17 +1517,17 @@ int main(int, char**) {
         }
     }
 
-    SDL_Window* win = SDL_CreateWindow("BeatPath DX - Rhythm Tile Puzzle",
-                                       SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-                                       cfg.winW, cfg.winH, SDL_WINDOW_SHOWN);
-    if (!win) { fprintf(stderr, "CreateWindow failed: %s\n", SDL_GetError()); return 1; }
+    g_win = SDL_CreateWindow("BeatPath DX - Rhythm Tile Puzzle",
+                             SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+                             cfg.winW, cfg.winH, SDL_WINDOW_SHOWN);
+    if (!g_win) { fprintf(stderr, "CreateWindow failed: %s\n", SDL_GetError()); return 1; }
 
-    SDL_SetWindowOpacity(win, 1.0f);
+    SDL_SetWindowOpacity(g_win, 1.0f);
 
-    SDL_Renderer* ren = SDL_CreateRenderer(win, -1,
-                          SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
-    if (!ren) ren = SDL_CreateRenderer(win, -1, 0);
-    if (!ren) { fprintf(stderr, "CreateRenderer failed: %s\n", SDL_GetError()); return 1; }
+    g_ren = SDL_CreateRenderer(g_win, -1,
+                      SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+    if (!g_ren) g_ren = SDL_CreateRenderer(g_win, -1, 0);
+    if (!g_ren) { fprintf(stderr, "CreateRenderer failed: %s\n", SDL_GetError()); return 1; }
 
     SDL_AudioSpec want, have;
     SDL_zero(want);
@@ -1393,125 +1550,16 @@ int main(int, char**) {
     loadProgress();
     enterMenuMusic();
 
-    bool running = true;
-    Uint32 prevTicks = SDL_GetTicks();
+    g_prevTicks = SDL_GetTicks();
 
-    while (running) {
-        SDL_Event e;
-        while (SDL_PollEvent(&e)) {
-            if (e.type == SDL_QUIT) { running = false; continue; }
-
-            if (e.type == SDL_KEYDOWN) {
-                SDL_Keycode k = e.key.keysym.sym;
-                if (k == SDLK_MINUS)
-                    A.vol100.store(std::max(0, A.vol100.load() - 10));
-                else if (k == SDLK_EQUALS || k == SDLK_PLUS)
-                    A.vol100.store(std::min(100, A.vol100.load() + 10));
-
-                if (G.scene == SC_TITLE) {
-                    if (k == SDLK_ESCAPE) running = false;
-                    else if (k == SDLK_RETURN || k == SDLK_SPACE) { G.scene = SC_SELECT; addVoice(SND_UI_ENTER.voice, SND_UI_ENTER.freq, SND_UI_ENTER.amp); }
-                } else if (G.scene == SC_SELECT) {
-                    if (k == SDLK_ESCAPE) G.scene = SC_TITLE;
-                } else { // SC_GAME
-                    if (k == SDLK_ESCAPE || k == SDLK_m) {
-                        G.scene = SC_SELECT;
-                        enterMenuMusic();
-                    } else if (k == SDLK_r) {
-                        loadStage(G.curStage);
-                    } else if (k == SDLK_n && G.cleared) {
-                        if (G.curStage + 1 < (int)G.stages.size())
-                            loadStage(G.curStage + 1);
-                        else { G.scene = SC_SELECT; enterMenuMusic(); }
-                    }
-                }
-            } else if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT) {
-                int mx = e.button.x, my = e.button.y;
-                if (G.scene == SC_TITLE) {
-                    G.scene = SC_SELECT;
-                    addVoice(SND_UI_ENTER.voice, SND_UI_ENTER.freq, SND_UI_ENTER.amp);
-                } else if (G.scene == SC_SELECT) {
-                    for (size_t i = 0; i < G.stages.size(); i++) {
-                        SDL_Rect rc = selectRect((int)i);
-                        SDL_Point p{ mx, my };
-                        if (SDL_PointInRect(&p, &rc)) {
-                            if (stageUnlocked((int)i)) {
-                                addVoice(SND_UI_SELECT_OK.voice, SND_UI_SELECT_OK.freq, SND_UI_SELECT_OK.amp);
-                                loadStage((int)i);
-                            } else {
-                                addVoice(SND_UI_SELECT_LOCK.voice, SND_UI_SELECT_LOCK.freq, SND_UI_SELECT_LOCK.amp);
-                            }
-                            break;
-                        }
-                    }
-                } else {
-                    gameMouseDown(mx, my);
-                }
-            } else if (e.type == SDL_MOUSEBUTTONUP && e.button.button == SDL_BUTTON_LEFT) {
-                if (G.scene == SC_GAME) gameMouseUp(e.button.x, e.button.y);
-            }
-        }
-
-        Uint32 now = SDL_GetTicks();
-        double dt = (now - prevTicks) / 1000.0;
-        prevTicks = now;
-        double nowSec = now / 1000.0;
-
-        // オーディオが無い環境では時間で拍を刻む
-        if (!g_audioOK) {
-            g_fallbackAccum += dt * 1000.0;
-            double beatMs = 60000.0 / A.bpm.load();
-            while (g_fallbackAccum >= beatMs) {
-                g_fallbackAccum -= beatMs;
-                g_fallbackBeats++;
-            }
-        }
-
-        long tb = g_audioOK ? A.totalBeats.load() : g_fallbackBeats;
-        while (G.processedBeats < tb) {
-            if (G.scene == SC_GAME) {
-                onBeat();
-            } else {
-                G.lastBeatIdx = (int)(G.processedBeats % A.beatsPM.load());
-                G.lastBeatTick = SDL_GetTicks();
-                G.shake = 1.5;
-            }
-            G.processedBeats++;
-        }
-
-        // ---- エフェクト更新 ----
-        for (auto& f : G.flashes) f.t += dt;
-        G.flashes.erase(std::remove_if(G.flashes.begin(), G.flashes.end(),
-                                       [](const Flash& f){ return f.t > 0.35; }),
-                        G.flashes.end());
-        for (auto& p : G.parts) {
-            p.x += p.vx * (float)dt;
-            p.y += p.vy * (float)dt;
-            p.vy += 320.0f * (float)dt;
-            p.life -= (float)dt;
-        }
-        G.parts.erase(std::remove_if(G.parts.begin(), G.parts.end(),
-                                     [](const Particle& p){ return p.life <= 0; }),
-                      G.parts.end());
-        G.shake *= pow(0.001, dt);
-
-        // ---- 描画 ----
-        int mx, my;
-        SDL_GetMouseState(&mx, &my);
-        SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_NONE);
-        SDL_SetRenderDrawColor(ren, 20, 20, 28, 255);
-        SDL_RenderClear(ren);
-        renderBackground(ren, nowSec);
-        if (G.scene == SC_TITLE)       renderTitle(ren, nowSec);
-        else if (G.scene == SC_SELECT) renderSelect(ren, nowSec, mx, my);
-        else                           renderGame(ren, nowSec, mx, my);
-        SDL_RenderPresent(ren);
-        SDL_Delay(1);
-    }
-
+#ifdef __EMSCRIPTEN__
+    emscripten_set_main_loop(mainLoopIteration, 0, 1);
+#else
+    while (g_running) mainLoopIteration();
     if (g_dev) SDL_CloseAudioDevice(g_dev);
-    SDL_DestroyRenderer(ren);
-    SDL_DestroyWindow(win);
+    SDL_DestroyRenderer(g_ren);
+    SDL_DestroyWindow(g_win);
     SDL_Quit();
+#endif
     return 0;
 }
