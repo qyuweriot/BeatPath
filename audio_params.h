@@ -104,7 +104,6 @@ static const TileSound TILE_SOUNDS[T_COUNT] = {
     /* T_SPLIT   */ { V_MARIMBA2, E5, 1.0f },
     /* T_SPLIT3  */ { V_MARIMBA3, G5, 1.0f },
     /* T_SPEED2  */ { V_TOM,      G3, 0.9f },
-    /* T_SLOW    */ { V_TOM,      D2, 0.9f },
     /* T_STOP    */ { V_TOM,      G3, 0.7f },
     /* T_PAINT_R */ { V_ORGAN,    C5, 0.8f },
     /* T_PAINT_B */ { V_ORGAN,    E5, 0.8f },

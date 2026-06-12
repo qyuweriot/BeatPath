@@ -9,7 +9,7 @@ enum TileType {
     T_EMPTY = 0,
     T_TURN_R, T_TURN_L,      // 方向転換
     T_SPLIT, T_SPLIT3,       // 分裂
-    T_SPEED2, T_SLOW,        // 速度変化
+    T_SPEED2,                // 次の1拍2マス先へジャンプ
     T_STOP,                  // 1拍停止
     T_PAINT_R, T_PAINT_B, T_PAINT_Y, // 色変更 (音色も変わる)
     T_COUNT
@@ -46,7 +46,7 @@ struct StageDef {
 //
 // タイル種別: T_TURN_R / T_TURN_L   右折・左折
 //             T_SPLIT  / T_SPLIT3   2分裂・3分裂
-//             T_SPEED2 / T_SLOW     速度2倍・1/2
+//             T_SPEED2              次の1拍2マス先へジャンプ
 //             T_STOP                1拍停止
 //             T_PAINT_R / B / Y     赤・青・黄に色変更
 // ------------------------------------------------------------

@@ -432,7 +432,6 @@ static void tileColor(TileType t, Uint8& cr, Uint8& cg, Uint8& cb) {
         case T_SPLIT:   cr = 170; cg = 110; cb = 230; break;
         case T_SPLIT3:  cr = 230; cg =  90; cb = 160; break;
         case T_SPEED2:  cr =  90; cg = 220; cb = 130; break;
-        case T_SLOW:    cr = 140; cg = 200; cb = 215; break;
         case T_STOP:    cr = 235; cg = 110; cb = 100; break;
         case T_PAINT_R: cr = BALLCOL[0].r; cg = BALLCOL[0].g; cb = BALLCOL[0].b; break;
         case T_PAINT_B: cr = BALLCOL[1].r; cg = BALLCOL[1].g; cb = BALLCOL[1].b; break;
@@ -485,10 +484,6 @@ static void drawTileIcon(SDL_Renderer* r, TileType t, int x, int y, int size, Ui
             drawChevron(r, cx - s * 0.35, cy, s * 0.55);
             drawChevron(r, cx + s * 0.55, cy, s * 0.55);
         } break;
-        case T_SLOW: {   // シェブロン + X0.5
-            drawChevron(r, cx, cy - s * 0.3, s * 0.5);
-            drawText(r, (int)(cx - 12), (int)(cy + s * 0.25), 1, "X0.5");
-        } break;
         case T_STOP: {   // ポーズバー
             SDL_Rect b1{ (int)(cx - s * 0.55), (int)(cy - s * 0.7), (int)(s * 0.35), (int)(s * 1.4) };
             SDL_Rect b2{ (int)(cx + s * 0.20), (int)(cy - s * 0.7), (int)(s * 0.35), (int)(s * 1.4) };
@@ -511,10 +506,7 @@ struct Ball {
     int x = 0, y = 0, px = 0, py = 0, dx = 1, dy = 0;
     int color = -1;          // -1: 白 / 0-2: BALLCOL
     int speed = 1;           // 2 = 1拍2マス
-    bool slow = false;       // 2拍1マス
-    bool slowPhase = false;
-    bool oneTimeFast = false; // 次の1拍だけ2倍速
-    bool oneTimeSlow = false; // 次の1拍だけスキップ(半速)
+    bool oneTimeFast = false; // 次の1拍2マス先へジャンプ
     int stopBeats = 0;       // 残り停止拍数
     bool alive = true;
     float hx[10], hy[10];    // 残像用の描画位置履歴
@@ -759,13 +751,13 @@ static bool processCell(Ball& b, std::vector<Ball>& newBalls) {
         } break;
         case T_SPEED2: { b.oneTimeFast = true;
                          addVoice(TILE_SOUNDS[t].voice, TILE_SOUNDS[t].freq, TILE_SOUNDS[t].amp, w); } break;
-        case T_SLOW:   { b.oneTimeSlow = true;
-                         addVoice(TILE_SOUNDS[t].voice, TILE_SOUNDS[t].freq, TILE_SOUNDS[t].amp, w); } break;
         case T_STOP:   { b.stopBeats = 1;
                          addVoice(TILE_SOUNDS[t].voice, TILE_SOUNDS[t].freq, TILE_SOUNDS[t].amp); } break;
         case T_PAINT_R: case T_PAINT_B: case T_PAINT_Y: {
-            b.color = (t == T_PAINT_R) ? 0 : (t == T_PAINT_B) ? 1 : 2;
-            addVoice(TILE_SOUNDS[t].voice, TILE_SOUNDS[t].freq, TILE_SOUNDS[t].amp);
+            if (b.color < 0) {
+                b.color = (t == T_PAINT_R) ? 0 : (t == T_PAINT_B) ? 1 : 2;
+                addVoice(TILE_SOUNDS[t].voice, TILE_SOUNDS[t].freq, TILE_SOUNDS[t].amp);
+            }
         } break;
         default: break;
     }
@@ -796,17 +788,12 @@ static void onBeat() {
         if (!b.alive) continue;
         b.px = b.x; b.py = b.y;
         if (b.stopBeats > 0) { b.stopBeats--; continue; }       // 1拍停止
-        if (b.oneTimeSlow) { b.oneTimeSlow = false; continue; } // 次の1拍だけスキップ
         if (b.oneTimeFast) {                                    // 1マス先をスキップして2マス先へジャンプ
             b.oneTimeFast = false;
             b.x += b.dx; b.y += b.dy;  // 1マス先: 座標のみ(壁・ギミック無視)
             b.x += b.dx; b.y += b.dy;  // 2マス先: 通常処理
             processCell(b, newBalls);
             continue;
-        }
-        if (b.slow) {                                           // 0.5倍速
-            b.slowPhase = !b.slowPhase;
-            if (!b.slowPhase) continue;
         }
         int steps = b.speed;                                    // 2倍速は1拍2マス
         for (int s = 0; s < steps && b.alive; s++) {
@@ -899,7 +886,6 @@ static const char* tileName(TileType t) {
         case T_SPLIT:   return "SPLIT";
         case T_SPLIT3:  return "SPLIT 3";
         case T_SPEED2:  return "SPEED X2";
-        case T_SLOW:    return "SLOW";
         case T_STOP:    return "STOP 1";
         case T_PAINT_R: return "PAINT RED";
         case T_PAINT_B: return "PAINT BLUE";
