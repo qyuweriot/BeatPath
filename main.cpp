@@ -29,6 +29,7 @@
 #include <string>
 #include <vector>
 #include "stages.h"
+#include "audio_params.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -40,25 +41,44 @@
 struct Config {
     int gridW    = 7;
     int gridH    = 5;
-    int cell     = 80;
+    int maxCell  = 120;  // CELL キーから読む。セルサイズの上限
+    int cell     = 80;   // computeDerived() が計算する実際のセルサイズ
     int volume   = 80;
     int menuBpm  = 112;
     int maxBalls = 64;
 
     // 派生レイアウト (computeDerived() で計算)
-    int gridX  = 40;   // 固定左マージン
-    int gridY  = 140;  // 固定上マージン (ヘッダー高さ)
+    int gridX  = 40;
+    int gridY  = 140;
     int panelX = 0;
     int winW   = 0;
     int winH   = 0;
 
     void computeDerived() {
-        panelX = gridX + gridW * cell + 66;
-        winW   = panelX + 214;
-        winH   = std::max(640, gridY + gridH * cell + 120);
+        static constexpr int WIN_W    = 1280;
+        static constexpr int WIN_H    = 720;
+        static constexpr int HEADER_H = 140;
+        static constexpr int FOOTER_H = 80;
+        static constexpr int PANEL_W  = 220;
+        static constexpr int LEFT_M   = 40;
+        static constexpr int GRID_GAP = 20;
+
+        winW   = WIN_W;
+        winH   = WIN_H;
+        panelX = WIN_W - PANEL_W;                  // 1060
+
+        int availW  = panelX - LEFT_M - GRID_GAP;  // 1000
+        int availH  = WIN_H - HEADER_H - FOOTER_H; // 500
+
+        int cellFit = std::min(availW / gridW, availH / gridH);
+        cell        = std::max(30, std::min(maxCell, cellFit));
+
+        gridX  = LEFT_M   + (availW - gridW * cell) / 2;
+        gridY  = HEADER_H + (availH - gridH * cell) / 2;
     }
 };
 static Config cfg;
+
 
 static const SDL_Color BALLCOL[3] = {
     {235,  85,  95, 255},   // 0: RED
@@ -69,8 +89,6 @@ static const SDL_Color BALLCOL[3] = {
 // ------------------------------------------------------------
 // オーディオ (リアルタイム合成)
 // ------------------------------------------------------------
-enum VoiceType { V_KICK, V_PLUCK, V_HAT, V_BASS, V_BELL, V_CLICK, V_SNARE, V_SWEEP, V_PAD };
-
 struct Voice {
     bool   active = false;
     int    type   = 0;
@@ -78,23 +96,6 @@ struct Voice {
     double t = 0, phase = 0, phase2 = 0, freq = 0, amp = 0;
     float  hp = 0;
 };
-
-// コード進行 Am -> F -> C -> G (4小節ループ)
-static const double BASS_ROOT[4]  = {110.00,  87.31,  65.41,  98.00}; // A2 F2 C2 G2
-static const double BASS_FIFTH[4] = { 82.41,  65.41,  98.00,  73.42}; // E2 C2 G2 D2
-static const double PAD_CH[4][3] = {
-    {220.00, 261.63, 329.63},   // Am: A3 C4 E4
-    {174.61, 220.00, 261.63},   // F : F3 A3 C4
-    {130.81, 196.00, 329.63},   // C : C3 G3 E4
-    {196.00, 246.94, 293.66},   // G : G3 B3 D4
-};
-static const double MELODY[4][4] = {
-    {440.00, 523.25, 659.25, 523.25},   // Am
-    {349.23, 440.00, 523.25, 440.00},   // F
-    {523.25, 659.25, 783.99, 659.25},   // C
-    {392.00, 493.88, 587.33, 493.88},   // G
-};
-static const char* CHORD_NAME[4] = {"AM", "F", "C", "G"};
 
 struct AudioState {
     static const int MAXV = 96;
@@ -106,8 +107,8 @@ struct AudioState {
     std::atomic<long> totalBeats{0};
     std::atomic<int>  bpm{112};
     std::atomic<int>  beatsPM{4};
-    std::atomic<int>  layer{0};       // 0:キック 1:+ハット 2:+ベース/パッド 3:+メロディ
-    std::atomic<int>  ballLayer{0};   // 球3個以上 -> 16分シェイカー
+    std::atomic<int>  layer{0};       // bit0:ハット(球生存) bit1:ベース(1枚設置) bit2:パッド(2枚設置) bit3:メロディ(クリア)
+    std::atomic<int>  ballLayer{0};   // 球2個以上 -> 16分シェイカー
     std::atomic<int>  vol100{80};     // マスター音量 0-100
 };
 
@@ -156,26 +157,30 @@ static void audioCallback(void*, Uint8* stream, int len) {
             long beatNum = A.samplePos / beatLen;
             int  idx  = (int)(beatNum % bpmeas);
             int  prog = (int)((beatNum / bpmeas) % 4);          // コード進行位置
-            addVoiceRaw(V_KICK, 0, idx == 0 ? 1.0 : 0.8);
-            if (layer >= 2) {
+            addVoiceRaw(V_KICK, 0, idx == 0 ? KICK_AMP_DOWN : KICK_AMP_WEAK);
+            if (layer & 2) {                                     // ベース (1枚以上設置)
                 if (idx == 0) {
-                    addVoiceRaw(V_BASS, BASS_ROOT[prog], 1.0);
-                    for (int c = 0; c < 3; c++)                  // コードパッド
-                        addVoiceRaw(V_PAD, PAD_CH[prog][c], 1.0);
+                    addVoiceRaw(V_BASS, BASS_ROOT[prog], BASS_AMP_ROOT);
                 } else if (idx == bpmeas / 2) {
-                    addVoiceRaw(V_BASS, BASS_FIFTH[prog], 0.8);
+                    addVoiceRaw(V_BASS, BASS_FIFTH[prog], BASS_AMP_FIFTH);
                 }
             }
-            if (layer >= 3) {
-                addVoiceRaw(V_PLUCK, MELODY[prog][A.melodyStep % 4], 0.55);
+            if (layer & 4) {                                     // コードパッド (2枚以上設置)
+                if (idx == 0) {
+                    for (int c = 0; c < 3; c++)
+                        addVoiceRaw(V_PAD, PAD_CH[prog][c], PAD_AMP);
+                }
+            }
+            if (layer & 8) {                                     // メロディ (クリア)
+                addVoiceRaw(V_PLUCK, MELODY[prog][A.melodyStep % 4], MELODY_AMP);
                 A.melodyStep++;
             }
             A.totalBeats.fetch_add(1);
-        } else if (layer >= 1 && half > 0 && A.samplePos % half == 0) {
-            addVoiceRaw(V_HAT, 0, 0.9);                          // 8分ハット
-        } else if (layer >= 2 && A.ballLayer.load() && quart > 0 &&
-                   A.samplePos % quart == 0) {
-            addVoiceRaw(V_HAT, 0, 0.35);                         // 16分シェイカー
+        } else if ((layer & 1) && half > 0 && A.samplePos % beatLen == half) {
+            addVoiceRaw(V_HAT, 0, HAT_AMP);                      // 8分ハット
+        } else if ((layer & 2) && A.ballLayer.load() && quart > 0 &&
+                   (A.samplePos % beatLen == quart || A.samplePos % beatLen == 3 * quart)) {
+            addVoiceRaw(V_HAT, 0, SHAKER_AMP);                   // 16分シェイカー
         }
 
         // ---- ボイスのレンダリング ----
@@ -249,6 +254,39 @@ static void audioCallback(void*, Uint8* stream, int len) {
                     double env = std::min(v.t * 6.0, 1.0) * exp(-v.t * 1.2);
                     s = (sin(v.phase) + sin(v.phase2)) * 0.5 * 0.13 * env * v.amp;
                     if (v.t > 3.0) v.active = false;
+                } break;
+                case V_MARIMBA: { // 木琴・マリンバ
+                    v.phase += 2.0 * M_PI * v.freq / sr;
+                    s = (sin(v.phase) * exp(-v.t * 7.0)
+                         + 0.15 * sin(4.0 * v.phase) * exp(-v.t * 20.0))
+                        * 0.5 * v.amp;
+                    if (v.t > 0.8) v.active = false;
+                } break;
+                case V_TOM: { // タム (有音程キック)
+                    double f = v.freq * (1.0 + 0.8 * exp(-v.t * 15.0));
+                    v.phase += 2.0 * M_PI * f / sr;
+                    s = sin(v.phase) * exp(-v.t * 12.0) * 0.7 * v.amp;
+                    if (v.t > 0.5) v.active = false;
+                } break;
+                case V_ORGAN: { // オルガン (ドローバー風、持続音)
+                    v.phase += 2.0 * M_PI * v.freq / sr;
+                    double env = std::min(v.t * 15.0, 1.0) * exp(-v.t * 0.6);
+                    s = (sin(v.phase) * 0.8
+                         + sin(2.0 * v.phase) * 0.5
+                         + sin(3.0 * v.phase) * 0.2
+                         + sin(4.0 * v.phase) * 0.1)
+                        * 0.15 * env * v.amp;
+                    if (v.t > 2.5) v.active = false;
+                } break;
+                case V_RIDE: { // ライドシンバル (高域ノイズ変調)
+                    float nz = frnd(A.rng);
+                    double hipass = (nz - v.hp) * 0.9; v.hp = nz;
+                    // ノイズを非整数比の高域キャリアで振幅変調 → ピッチ感のないシマー
+                    v.phase  += 2.0 * M_PI * 5200.0 / sr;
+                    v.phase2 += 2.0 * M_PI * 8300.0 / sr;
+                    double shimmer = hipass * (1.0 + 0.5 * sin(v.phase) + 0.3 * sin(v.phase2));
+                    s = shimmer * exp(-v.t * 8.0) * 0.30 * v.amp;
+                    if (v.t > 0.7) v.active = false;
                 } break;
             }
             v.t += 1.0 / sr;
@@ -460,6 +498,7 @@ struct Game {
     std::vector<std::vector<TileType>> grid;  // grid[y][x]
     std::vector<Ball> balls;
     std::vector<int>  goalLit;
+    std::vector<bool> goalHitAtHead;
     std::vector<Wall> walls;
     std::vector<std::pair<TileType, int>> inv;
     std::vector<Flash> flashes;
@@ -571,12 +610,20 @@ static int colorWave(int color) { return color < 0 ? 0 : 1 + color; }
 // ------------------------------------------------------------
 static void loadStage(int idx) {
     G.curStage = idx;
+    {
+        int ew = stage().gridW > 0 ? stage().gridW : 7;
+        int eh = stage().gridH > 0 ? stage().gridH : 5;
+        cfg.gridW = ew;
+        cfg.gridH = eh;
+        cfg.computeDerived();
+    }
     G.grid.assign(cfg.gridH, std::vector<TileType>(cfg.gridW, T_EMPTY));
     G.balls.clear();
     G.flashes.clear();
     G.parts.clear();
     G.inv = stage().inv;
     G.goalLit.assign(stage().goals.size(), 0);
+    G.goalHitAtHead.assign(stage().goals.size(), false);
     G.walls.clear();
     for (auto& w : stage().walls)
         if (w.x < cfg.gridW && w.y < cfg.gridH)
@@ -617,7 +664,7 @@ static bool processCell(Ball& b, std::vector<Ball>& newBalls) {
     // 場外
     if (b.x < 0 || b.x >= cfg.gridW || b.y < 0 || b.y >= cfg.gridH) {
         b.alive = false;
-        addVoice(V_CLICK, 180, 0.4);
+        addVoice(SND_BALL_OUT.voice, SND_BALL_OUT.freq, SND_BALL_OUT.amp);
         return false;
     }
     // 壁: ぶつけて破壊 (スネア)
@@ -625,7 +672,7 @@ static bool processCell(Ball& b, std::vector<Ball>& newBalls) {
     if (wi >= 0) {
         G.walls[wi].alive = false;
         b.alive = false;
-        addVoice(V_SNARE, 0, 1.0);
+        addVoice(SND_WALL_BREAK.voice, SND_WALL_BREAK.freq, SND_WALL_BREAK.amp);
         cellBurst(b.x, b.y, 150, 145, 160, 16, 220);
         G.flashes.push_back({b.x, b.y, 0});
         G.everTriggered = true;
@@ -637,9 +684,9 @@ static bool processCell(Ball& b, std::vector<Ball>& newBalls) {
         const GoalDef& g = stage().goals[gi];
         if (g.color < 0 || g.color == b.color) {
             G.goalLit[gi] = stage().beatsPM;
+            if (G.lastBeatIdx == 0) G.goalHitAtHead[gi] = true;
             G.goalsEverHit++;
-            static const double bell[] = {523.25, 659.25, 783.99, 880.0};
-            addVoice(V_BELL, bell[gi % 4], 1.0);
+            addVoice(V_BELL, GOAL_FREQ[gi % 4], GOAL_AMP);
             Uint8 cr = 255, cg = 220, cb = 90;
             if (g.color >= 0) { cr = BALLCOL[g.color].r; cg = BALLCOL[g.color].g; cb = BALLCOL[g.color].b; }
             cellBurst(b.x, b.y, cr, cg, cb, 16, 200);
@@ -647,14 +694,14 @@ static bool processCell(Ball& b, std::vector<Ball>& newBalls) {
             b.alive = false;
             return false;
         } else {
-            addVoice(V_CLICK, 130, 0.5);   // 色違い: 鈍い音で素通り
+            addVoice(SND_GOAL_WRONG.voice, SND_GOAL_WRONG.freq, SND_GOAL_WRONG.amp);
             return true;
         }
     }
     // ワープ: 対になった出口へ (方向維持)
     int ox, oy;
     if (warpAt(b.x, b.y, ox, oy)) {
-        addVoice(V_SWEEP, 300, 1.0);
+        addVoice(SND_WARP.voice, SND_WARP.freq, SND_WARP.amp);
         cellBurst(b.x, b.y, 110, 230, 230, 8, 160);
         b.x = ox; b.y = oy;
         b.px = ox; b.py = oy;             // 補間でワープ間を横切らないように
@@ -670,9 +717,9 @@ static bool processCell(Ball& b, std::vector<Ball>& newBalls) {
     int w = colorWave(b.color);
     switch (t) {
         case T_TURN_R: { int nx = -b.dy, ny = b.dx; b.dx = nx; b.dy = ny;
-                         addVoice(V_PLUCK, 220.00, 1.0, w); } break;
+                         addVoice(TILE_SOUNDS[t].voice, TILE_SOUNDS[t].freq, TILE_SOUNDS[t].amp, w); } break;
         case T_TURN_L: { int nx = b.dy, ny = -b.dx; b.dx = nx; b.dy = ny;
-                         addVoice(V_PLUCK, 261.63, 1.0, w); } break;
+                         addVoice(TILE_SOUNDS[t].voice, TILE_SOUNDS[t].freq, TILE_SOUNDS[t].amp, w); } break;
         case T_SPLIT: {
             Ball l = b, rgt = b;
             l.dx = b.dy;    l.dy = -b.dx;  l.hn = 0;  l.hi = 0;
@@ -680,7 +727,7 @@ static bool processCell(Ball& b, std::vector<Ball>& newBalls) {
             b.alive = false;
             newBalls.push_back(l);
             newBalls.push_back(rgt);
-            addVoice(V_PLUCK, 659.25, 1.0, w);
+            addVoice(TILE_SOUNDS[t].voice, TILE_SOUNDS[t].freq, TILE_SOUNDS[t].amp, w);
             G.flashes.push_back({b.x, b.y, 0});
             cellBurst(b.x, b.y, cr, cg, cb, 8, 150);
             G.everTriggered = true;
@@ -692,18 +739,17 @@ static bool processCell(Ball& b, std::vector<Ball>& newBalls) {
             rgt.dx = -b.dy; rgt.dy = b.dx; rgt.hn = 0; rgt.hi = 0;
             newBalls.push_back(l);
             newBalls.push_back(rgt);
-            addVoice(V_PLUCK, 783.99, 1.0, w);
+            addVoice(TILE_SOUNDS[t].voice, TILE_SOUNDS[t].freq, TILE_SOUNDS[t].amp, w);
         } break;
         case T_SPEED2: { b.speed = 2; b.slow = false;
-                         addVoice(V_PLUCK, 880.00, 0.8, w); } break;
+                         addVoice(TILE_SOUNDS[t].voice, TILE_SOUNDS[t].freq, TILE_SOUNDS[t].amp, w); } break;
         case T_SLOW:   { b.speed = 1; b.slow = true; b.slowPhase = true;
-                         addVoice(V_PLUCK, 146.83, 0.9, w); } break;
+                         addVoice(TILE_SOUNDS[t].voice, TILE_SOUNDS[t].freq, TILE_SOUNDS[t].amp, w); } break;
         case T_STOP:   { b.stopBeats = 1;
-                         addVoice(V_CLICK, 110, 0.7); } break;
+                         addVoice(TILE_SOUNDS[t].voice, TILE_SOUNDS[t].freq, TILE_SOUNDS[t].amp); } break;
         case T_PAINT_R: case T_PAINT_B: case T_PAINT_Y: {
             b.color = (t == T_PAINT_R) ? 0 : (t == T_PAINT_B) ? 1 : 2;
-            static const double pf[3] = {523.25, 659.25, 783.99};
-            addVoice(V_BELL, pf[b.color], 0.8);
+            addVoice(TILE_SOUNDS[t].voice, TILE_SOUNDS[t].freq, TILE_SOUNDS[t].amp);
         } break;
         default: break;
     }
@@ -722,6 +768,11 @@ static void onBeat() {
     G.lastBeatIdx = idx;
     G.lastBeatTick = SDL_GetTicks();
     G.shake = (idx == 0) ? 5.0 : 3.0;
+
+    // 小節の頭: 前小節のヒット記録をリセット (ボール移動前)
+    if (idx == 0) {
+        std::fill(G.goalHitAtHead.begin(), G.goalHitAtHead.end(), false);
+    }
 
     // ---- 球の移動 ----
     std::vector<Ball> newBalls;
@@ -758,7 +809,7 @@ static void onBeat() {
         }
     }
 
-    // ---- ゴール点灯とクリア判定 (全ゴール同時点灯でクリア) ----
+    // ---- ゴール点灯とクリア判定 (小節の頭に全ゴール同時到達でクリア) ----
     bool allLit = false;
     bool hasInBoundsGoal = false;
     for (size_t i = 0; i < G.goalLit.size(); i++) {
@@ -767,22 +818,20 @@ static void onBeat() {
         hasInBoundsGoal = true;
         if (G.goalLit[i] > 0) G.goalLit[i]--;
     }
-    if (hasInBoundsGoal) {
+    if (idx == 0 && hasInBoundsGoal) {
         allLit = true;
         for (size_t i = 0; i < G.goalLit.size(); i++) {
             auto& g = stage().goals[i];
             if (g.x >= cfg.gridW || g.y >= cfg.gridH) continue;
-            if (G.goalLit[i] <= 0) { allLit = false; break; }
+            if (!G.goalHitAtHead[i]) { allLit = false; break; }
         }
     }
     if (allLit && !G.cleared) {
         G.cleared = true;
         G.clearedStages[G.curStage] = true;
         saveProgress();
-        addVoice(V_BELL,  523.25, 1.0);
-        addVoice(V_BELL,  659.25, 0.9);
-        addVoice(V_BELL,  783.99, 0.9);
-        addVoice(V_BELL, 1046.50, 0.8);
+        for (int i = 0; i < 4; i++)
+            addVoice(SND_CLEAR[i].voice, SND_CLEAR[i].freq, SND_CLEAR[i].amp);
         for (auto& g : stage().goals) {
             if (g.x < cfg.gridW && g.y < cfg.gridH)
                 cellBurst(g.x, g.y, 255, 230, 120, 20, 260);
@@ -790,24 +839,26 @@ static void onBeat() {
         G.shake = 9;
     }
 
-    // ---- 進行度に応じて音楽レイヤーを増やす ----
-    bool anyPlaced = false;
+    // ---- 進行度に応じて音楽レイヤーを更新 (ビットマスク) ----
+    bool ballAlive = std::any_of(G.balls.begin(), G.balls.end(), [](const Ball& b){ return b.alive; });
+    int tilesPlaced = 0;
     for (int y = 0; y < cfg.gridH; y++)
         for (int x = 0; x < cfg.gridW; x++)
-            if (G.grid[y][x] != T_EMPTY) anyPlaced = true;
+            if (G.grid[y][x] != T_EMPTY) tilesPlaced++;
     int layer = 0;
-    if (anyPlaced || G.everTriggered) layer = 1;
-    if (G.goalsEverHit > 0)           layer = 2;
-    if (G.cleared)                    layer = 3;
+    if (ballAlive)        layer |= 1;   // ハット
+    if (tilesPlaced >= 1) layer |= 2;   // ベース
+    if (tilesPlaced >= 2) layer |= 4;   // コードパッド
+    if (G.cleared)        layer |= 8;   // メロディ
     A.layer.store(layer);
-    A.ballLayer.store((int)G.balls.size() >= 3 ? 1 : 0);
+    A.ballLayer.store((int)G.balls.size() >= 2 ? 1 : 0);
 }
 
 // ------------------------------------------------------------
 // 入力 (ドラッグ&ドロップ)
 // ------------------------------------------------------------
 static SDL_Rect paletteRect(int i) {
-    return SDL_Rect{ cfg.panelX + 12, cfg.gridY + 38 + i * 62, 56, 56 };
+    return SDL_Rect{ cfg.panelX + 12, 140 + 38 + i * 62, 56, 56 };
 }
 
 static bool cellAt(int mx, int my, int& cx, int& cy) {
@@ -841,7 +892,7 @@ static void gameMouseDown(int mx, int my) {
             G.inv[i].second--;
             G.dragging = true;
             G.dragType = G.inv[i].first;
-            addVoice(V_CLICK, 1400, 0.6);
+            addVoice(SND_DRAG_START.voice, SND_DRAG_START.freq, SND_DRAG_START.amp);
             return;
         }
     }
@@ -850,7 +901,7 @@ static void gameMouseDown(int mx, int my) {
         G.dragType = G.grid[cy][cx];
         G.grid[cy][cx] = T_EMPTY;
         G.dragging = true;
-        addVoice(V_CLICK, 1400, 0.6);
+        addVoice(SND_DRAG_START.voice, SND_DRAG_START.freq, SND_DRAG_START.amp);
     }
 }
 
@@ -865,10 +916,10 @@ static void gameMouseUp(int mx, int my) {
     int cx, cy;
     if (cellAt(mx, my, cx, cy) && cellPlaceable(cx, cy)) {
         G.grid[cy][cx] = G.dragType;
-        addVoice(V_CLICK, 850, 0.8);
+        addVoice(SND_TILE_PLACE_OK.voice, SND_TILE_PLACE_OK.freq, SND_TILE_PLACE_OK.amp);
     } else {
         returnToInventory(G.dragType);
-        addVoice(V_CLICK, 500, 0.5);
+        addVoice(SND_TILE_PLACE_NG.voice, SND_TILE_PLACE_NG.freq, SND_TILE_PLACE_NG.amp);
     }
 }
 
@@ -877,7 +928,8 @@ static void gameMouseUp(int mx, int my) {
 // ------------------------------------------------------------
 static SDL_Rect selectRect(int i) {
     int col = i % 4, row = i / 4;
-    return SDL_Rect{ 50 + col * 200, 180 + row * 150, 180, 120 };
+    int colW = (cfg.winW - 100) / 4;
+    return SDL_Rect{ 50 + col * colW, 180 + row * 150, colW - 20, 120 };
 }
 
 // ------------------------------------------------------------
@@ -906,10 +958,11 @@ static void renderGame(SDL_Renderer* r, double nowSec, int mx, int my) {
     SDL_SetRenderDrawColor(r, 150, 150, 165, 255);
     drawText(r, meterX, 24, 1, "MUSIC LV");
     int lay = A.layer.load();
-    for (int i = 0; i < 4; i++) {
-        SDL_Rect rc{ meterX + i * 26, 38, 20, 12 };
-        if (i <= lay) SDL_SetRenderDrawColor(r, 120, 230, 160, 255);
-        else          SDL_SetRenderDrawColor(r, 60, 60, 76, 255);
+    for (int i = 0; i < 5; i++) {
+        SDL_Rect rc{ meterX + i * 22, 38, 16, 12 };
+        bool lit = (i == 0) || (lay & (1 << (i - 1)));
+        if (lit) SDL_SetRenderDrawColor(r, 120, 230, 160, 255);
+        else     SDL_SetRenderDrawColor(r, 60, 60, 76, 255);
         SDL_RenderFillRect(r, &rc);
     }
     snprintf(buf, sizeof(buf), "VOL %d", A.vol100.load());
@@ -929,7 +982,8 @@ static void renderGame(SDL_Renderer* r, double nowSec, int mx, int my) {
             drawCircle(r, x, bcy, 12);
         }
     }
-    int prog = (int)((G.processedBeats / bpmeas) % 4);
+    long _pb = G.processedBeats > 0 ? G.processedBeats - 1 : 0;
+    int prog = (int)((_pb / bpmeas) % 4);
     for (int c = 0; c < 4; c++) {
         if (c == prog) SDL_SetRenderDrawColor(r, 235, 235, 240, 255);
         else           SDL_SetRenderDrawColor(r, 85, 85, 100, 255);
@@ -1085,12 +1139,12 @@ static void renderGame(SDL_Renderer* r, double nowSec, int mx, int my) {
 
     // ---- 右: ギミックパネル置き場 ----
     SDL_SetRenderDrawColor(r, 40, 40, 54, 255);
-    SDL_Rect pal{ cfg.panelX, cfg.gridY, 196, cfg.winH - cfg.gridY - 30 };
+    SDL_Rect pal{ cfg.panelX, 140, 196, cfg.winH - 140 - 30 };
     SDL_RenderFillRect(r, &pal);
     SDL_SetRenderDrawColor(r, 90, 90, 110, 255);
     SDL_RenderDrawRect(r, &pal);
     SDL_SetRenderDrawColor(r, 220, 220, 230, 255);
-    drawText(r, cfg.panelX + 12, cfg.gridY + 14, 2, "TILES");
+    drawText(r, cfg.panelX + 12, 140 + 14, 2, "TILES");
     for (size_t i = 0; i < G.inv.size(); i++) {
         SDL_Rect rc = paletteRect((int)i);
         SDL_SetRenderDrawColor(r, 58, 58, 76, 255);
@@ -1256,12 +1310,8 @@ static void saveDefaultConfig() {
         "# BeatPath DX 設定ファイル\n"
         "# 変更後はゲームを再起動してください\n"
         "\n"
-        "# グリッド列数 (推奨: 4-12)\n"
-        "GRID_W=7\n"
-        "# グリッド行数 (推奨: 3-8)\n"
-        "GRID_H=5\n"
-        "# 1マスのピクセルサイズ in px (推奨: 60-100)\n"
-        "CELL=80\n"
+        "# 1マスの最大ピクセルサイズ in px (グリッドサイズに合わせて自動調整)\n"
+        "CELL=120\n"
         "# 初期音量 (0-100)\n"
         "VOLUME=80\n"
         "# タイトル/セレクト画面のBPM\n"
@@ -1290,9 +1340,7 @@ static void loadConfig() {
             char* e = key + strlen(key) - 1;
             while (e > key && (*e == ' ' || *e == '\t')) *e-- = '\0';
             int v = atoi(val);
-            if      (strcmp(key, "GRID_W")    == 0) cfg.gridW    = std::max(3, std::min(20, v));
-            else if (strcmp(key, "GRID_H")    == 0) cfg.gridH    = std::max(3, std::min(15, v));
-            else if (strcmp(key, "CELL")      == 0) cfg.cell     = std::max(30, std::min(150, v));
+            if      (strcmp(key, "CELL")      == 0) cfg.maxCell  = std::max(30, std::min(150, v));
             else if (strcmp(key, "VOLUME")    == 0) cfg.volume   = std::max(0, std::min(100, v));
             else if (strcmp(key, "MENU_BPM")  == 0) cfg.menuBpm  = std::max(60, std::min(240, v));
             else if (strcmp(key, "MAX_BALLS") == 0) cfg.maxBalls = std::max(8, std::min(256, v));
@@ -1319,6 +1367,7 @@ int main(int, char**) {
                                        SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
                                        cfg.winW, cfg.winH, SDL_WINDOW_SHOWN);
     if (!win) { fprintf(stderr, "CreateWindow failed: %s\n", SDL_GetError()); return 1; }
+
     SDL_SetWindowOpacity(win, 1.0f);
 
     SDL_Renderer* ren = SDL_CreateRenderer(win, -1,
@@ -1364,7 +1413,7 @@ int main(int, char**) {
 
                 if (G.scene == SC_TITLE) {
                     if (k == SDLK_ESCAPE) running = false;
-                    else if (k == SDLK_RETURN || k == SDLK_SPACE) { G.scene = SC_SELECT; addVoice(V_BELL, 659.25, 0.8); }
+                    else if (k == SDLK_RETURN || k == SDLK_SPACE) { G.scene = SC_SELECT; addVoice(SND_UI_ENTER.voice, SND_UI_ENTER.freq, SND_UI_ENTER.amp); }
                 } else if (G.scene == SC_SELECT) {
                     if (k == SDLK_ESCAPE) G.scene = SC_TITLE;
                 } else { // SC_GAME
@@ -1383,17 +1432,17 @@ int main(int, char**) {
                 int mx = e.button.x, my = e.button.y;
                 if (G.scene == SC_TITLE) {
                     G.scene = SC_SELECT;
-                    addVoice(V_BELL, 659.25, 0.8);
+                    addVoice(SND_UI_ENTER.voice, SND_UI_ENTER.freq, SND_UI_ENTER.amp);
                 } else if (G.scene == SC_SELECT) {
                     for (size_t i = 0; i < G.stages.size(); i++) {
                         SDL_Rect rc = selectRect((int)i);
                         SDL_Point p{ mx, my };
                         if (SDL_PointInRect(&p, &rc)) {
                             if (stageUnlocked((int)i)) {
-                                addVoice(V_BELL, 783.99, 0.8);
+                                addVoice(SND_UI_SELECT_OK.voice, SND_UI_SELECT_OK.freq, SND_UI_SELECT_OK.amp);
                                 loadStage((int)i);
                             } else {
-                                addVoice(V_CLICK, 130, 0.6);
+                                addVoice(SND_UI_SELECT_LOCK.voice, SND_UI_SELECT_LOCK.freq, SND_UI_SELECT_LOCK.amp);
                             }
                             break;
                         }

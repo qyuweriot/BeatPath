@@ -26,7 +26,7 @@ SDL2_CFLAGS := $(shell $(SDL2_CONFIG) --cflags | sed 's|-I\([^ ]*/include\)/SDL2
 CXXFLAGS  = -O2 -std=c++17 -Wall $(ARCHFLAG) $(SDL2_CFLAGS)
 LIBS      = $(ARCHFLAG) $(shell $(SDL2_CONFIG) --libs) -lm
 
-beatpath: main.cpp
+beatpath: main.cpp stages.h audio_params.h
 	$(CXX) $(CXXFLAGS) -o $@ main.cpp $(LIBS)
 
 run: beatpath
